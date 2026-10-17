@@ -177,6 +177,31 @@ func TestSigningSeedErrors(t *testing.T) {
 	})
 }
 
+func TestLoadEnvParsesAPITokenList(t *testing.T) {
+	// Spaces and empty entries are tolerated; a trailing comma from a script
+	// must not stop the server from starting.
+	t.Setenv(EnvAPITokens, " first-token , second-token ,, third-token ")
+	assert.Equal(t, []string{"first-token", "second-token", "third-token"}, LoadEnv().APITokens)
+}
+
+func TestAPITokenList(t *testing.T) {
+	t.Run("single token variable", func(t *testing.T) {
+		assert.Equal(t, []string{"only"}, Env{APIToken: "only"}.APITokenList())
+	})
+
+	t.Run("list wins over single variable", func(t *testing.T) {
+		// Documented in the README: an operator who writes the list means the
+		// list, so rotation cannot be defeated by a stale single variable.
+		env := Env{APIToken: "stale", APITokens: []string{"new", "old"}}
+		assert.Equal(t, []string{"new", "old"}, env.APITokenList())
+	})
+
+	t.Run("nothing configured", func(t *testing.T) {
+		assert.Empty(t, Env{}.APITokenList())
+		assert.Empty(t, Env{APITokens: []string{}}.APITokenList())
+	})
+}
+
 func TestHasSigningKey(t *testing.T) {
 	assert.False(t, Env{}.HasSigningKey())
 	assert.True(t, Env{SecretKey: "S"}.HasSigningKey())
@@ -191,6 +216,7 @@ func TestRedactedNeverExposesSecrets(t *testing.T) {
 		SecretKey:    "SDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEAD",
 		KeystorePath: "/keys/deployer",
 		APIToken:     "super-secret-token",
+		APITokens:    []string{"rotating-secret-one", "rotating-secret-two"},
 	}
 
 	redacted := env.Redacted()
@@ -199,11 +225,14 @@ func TestRedactedNeverExposesSecrets(t *testing.T) {
 		assert.NotContains(t, value, "hunter2", "%s leaked the database password", key)
 		assert.NotContains(t, value, "SDEADBEEF", "%s leaked the secret key", key)
 		assert.NotContains(t, value, "super-secret-token", "%s leaked the API token", key)
+		assert.NotContains(t, value, "rotating-secret", "%s leaked a rotating API token", key)
 	}
 
 	assert.Equal(t, "(set)", redacted[EnvSecretKey])
 	assert.Equal(t, "(set)", redacted[EnvAPIToken])
+	assert.Equal(t, "(set)", redacted[EnvAPITokens])
 	assert.Equal(t, "(unset)", Env{}.Redacted()[EnvSecretKey])
+	assert.Equal(t, "(unset)", Env{}.Redacted()[EnvAPITokens])
 
 	// A path is not itself a secret and is useful for diagnosing which key
 	// source was picked.

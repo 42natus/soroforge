@@ -285,7 +285,7 @@ Endpoints:
 
 			handler, err := api.NewRouter(api.Options{
 				Service: a.service,
-				Token:   a.cfg.Env.APIToken,
+				Tokens:  a.cfg.Env.APITokenList(),
 				Log:     slog.Default(),
 			})
 			if err != nil {

@@ -39,6 +39,12 @@ const (
 	// refuses to start when it is unset.
 	EnvAPIToken = "SOROFORGE_API_TOKEN"
 
+	// EnvAPITokens is a comma-separated list of bearer tokens accepted by the
+	// HTTP API, for zero-downtime rotation: add the new token, move clients
+	// over, then remove the old one. EnvAPIToken is a one-element shorthand
+	// for it, and EnvAPITokens wins when both are set.
+	EnvAPITokens = "SOROFORGE_API_TOKENS"
+
 	// EnvAPIAddr overrides the HTTP API listen address.
 	EnvAPIAddr = "SOROFORGE_API_ADDR"
 )
@@ -60,6 +66,7 @@ type Env struct {
 	SecretKey    string
 	KeystorePath string
 	APIToken     string
+	APITokens    []string
 	APIAddr      string
 
 	// AllowInsecureKeystore accepts a keystore readable by group or others.
@@ -77,6 +84,7 @@ func LoadEnv() Env {
 		KeystorePath:          strings.TrimSpace(os.Getenv(EnvKeystorePath)),
 		AllowInsecureKeystore: envBool(os.Getenv(EnvAllowInsecureKeystore)),
 		APIToken:              os.Getenv(EnvAPIToken),
+		APITokens:             splitTokens(os.Getenv(EnvAPITokens)),
 		APIAddr:               strings.TrimSpace(os.Getenv(EnvAPIAddr)),
 	}
 }
@@ -96,6 +104,20 @@ func (e Env) ListenAddr() string {
 		return DefaultAPIAddr
 	}
 	return e.APIAddr
+}
+
+// APITokenList returns every configured API token, in the order they appear.
+//
+// EnvAPITokens wins when both variables are set: an operator who writes the
+// list means the list. EnvAPIToken remains the one-token shorthand.
+func (e Env) APITokenList() []string {
+	if len(e.APITokens) > 0 {
+		return e.APITokens
+	}
+	if e.APIToken != "" {
+		return []string{e.APIToken}
+	}
+	return nil
 }
 
 // SigningSeed returns the deployer's secret seed from whichever source is
@@ -185,6 +207,7 @@ func (e Env) Redacted() map[string]string {
 		// the permission check was explicitly waived.
 		EnvAllowInsecureKeystore: fmt.Sprintf("%t", e.AllowInsecureKeystore),
 		EnvAPIToken:              redact(e.APIToken),
+		EnvAPITokens:             redactList(e.APITokens),
 		EnvAPIAddr:               e.ListenAddr(),
 	}
 }
@@ -194,6 +217,25 @@ func redact(v string) string {
 		return "(unset)"
 	}
 	return "(set)"
+}
+
+func redactList(v []string) string {
+	if len(v) == 0 {
+		return "(unset)"
+	}
+	return "(set)"
+}
+
+// splitTokens parses a comma-separated token list, trimming surrounding space
+// and dropping empty entries so a trailing comma is not a startup failure.
+func splitTokens(v string) []string {
+	var tokens []string
+	for _, part := range strings.Split(v, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			tokens = append(tokens, part)
+		}
+	}
+	return tokens
 }
 
 // envBool reports whether an environment variable is set to a truthy value.

@@ -21,6 +21,13 @@ import (
 
 const testToken = "test-token-long-enough-to-pass"
 
+// Rotation tests need two distinct tokens and one that matches neither.
+const (
+	testTokenA = "test-token-rotation-old-0001"
+	testTokenB = "test-token-rotation-new-0002"
+	testTokenC = "test-token-rotation-nope-0003"
+)
+
 // fakeService records calls and returns canned results, so the handlers are
 // tested for what they do with HTTP rather than for lifecycle behaviour — that
 // is covered in the deploy package.
@@ -106,6 +113,17 @@ func newTestRouter(t *testing.T, svc api.Service) http.Handler {
 	return router
 }
 
+func newTestRouterWithTokens(t *testing.T, svc api.Service, tokens ...string) http.Handler {
+	t.Helper()
+	router, err := api.NewRouter(api.Options{
+		Service: svc,
+		Tokens:  tokens,
+		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	return router
+}
+
 // do issues a request with the valid bearer token unless token is overridden.
 func do(t *testing.T, router http.Handler, method, path string, body any, token *string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -149,6 +167,66 @@ func TestServerRefusesShortTokens(t *testing.T) {
 	_, err := api.NewRouter(api.Options{Service: &fakeService{}, Token: "short"})
 	assert.ErrorContains(t, err, "at least")
 }
+
+func TestServerRefusesDuplicateTokens(t *testing.T) {
+	// Duplicates are almost certainly a copy-paste slip during rotation, and
+	// accepting them would make "remove one token" ambiguous at audit time.
+	_, err := api.NewRouter(api.Options{
+		Service: &fakeService{},
+		Tokens:  []string{testTokenA, testTokenA},
+	})
+	assert.ErrorContains(t, err, "duplicates")
+	// The message must not print the token itself.
+	assert.NotContains(t, err.Error(), testTokenA)
+}
+
+func TestServerRefusesAWeakTokenInTheList(t *testing.T) {
+	// One strong token does not excuse a weak one: every accepted credential
+	// guards the same signing key.
+	_, err := api.NewRouter(api.Options{
+		Service: &fakeService{},
+		Tokens:  []string{testTokenA, "short"},
+	})
+	assert.ErrorContains(t, err, "at least")
+}
+
+func TestEveryConfiguredTokenAuthorises(t *testing.T) {
+	// Zero-downtime rotation: during the overlap, both the old and the new
+	// token must work.
+	svc := &fakeService{contracts: []store.Contract{}}
+	router := newTestRouterWithTokens(t, svc, testTokenA, testTokenB)
+
+	for _, token := range []string{testTokenA, testTokenB} {
+		token := token
+		t.Run(token, func(t *testing.T) {
+			rec := do(t, router, http.MethodGet, "/v1/contracts", nil, &token)
+			assert.Equal(t, http.StatusOK, rec.Code)
+		})
+	}
+
+	// A token matching neither is rejected.
+	rec := do(t, router, http.MethodGet, "/v1/contracts", nil, ptr(testTokenC))
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestRotationRejectsRemovedToken(t *testing.T) {
+	// The point of rotation: once the old token is removed from config, it
+	// stops working immediately.
+	svc := &fakeService{contracts: []store.Contract{}}
+
+	beforeRemoval := newTestRouterWithTokens(t, svc, testTokenA, testTokenB)
+	assert.Equal(t, http.StatusOK,
+		do(t, beforeRemoval, http.MethodGet, "/v1/contracts", nil, ptr(testTokenB)).Code)
+
+	afterRemoval := newTestRouterWithTokens(t, svc, testTokenB)
+	assert.Equal(t, http.StatusOK,
+		do(t, afterRemoval, http.MethodGet, "/v1/contracts", nil, ptr(testTokenB)).Code)
+	assert.Equal(t, http.StatusUnauthorized,
+		do(t, afterRemoval, http.MethodGet, "/v1/contracts", nil, ptr(testTokenA)).Code)
+}
+
+// ptr returns a pointer to v, for do's optional token argument.
+func ptr(v string) *string { return &v }
 
 func TestNewRouterRequiresService(t *testing.T) {
 	_, err := api.NewRouter(api.Options{Token: testToken})

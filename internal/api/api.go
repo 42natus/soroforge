@@ -52,9 +52,16 @@ type Options struct {
 	// Service performs the work. Required.
 	Service Service
 
-	// Token is the bearer token required by mutating endpoints. The server
-	// refuses to start if it is empty or too short.
+	// Token is a single bearer token accepted by /v1 endpoints. It is kept
+	// for callers that predate rotation; Tokens supersedes it when both are
+	// set.
 	Token string
+
+	// Tokens lists every bearer token accepted by /v1 endpoints. More than
+	// one lets operators rotate without downtime: add the new token, move
+	// clients over, then remove the old one. The server refuses to start if
+	// the resolved list is empty, any token is too short, or two are equal.
+	Tokens []string
 
 	// Log defaults to slog.Default().
 	Log *slog.Logger
@@ -69,7 +76,11 @@ func NewRouter(opts Options) (http.Handler, error) {
 	if opts.Service == nil {
 		return nil, fmt.Errorf("api: service is required")
 	}
-	if err := validateToken(opts.Token); err != nil {
+	tokens := opts.Tokens
+	if len(tokens) == 0 && opts.Token != "" {
+		tokens = []string{opts.Token}
+	}
+	if err := validateTokens(tokens); err != nil {
 		return nil, err
 	}
 
@@ -90,7 +101,7 @@ func NewRouter(opts Options) (http.Handler, error) {
 	r.Get("/health", h.health)
 
 	r.Route("/v1", func(r chi.Router) {
-		r.Use(BearerAuth(opts.Token))
+		r.Use(BearerAuthTokens(tokens))
 
 		r.Post("/deploy", h.deploy)
 		r.Post("/upgrade", h.upgrade)
