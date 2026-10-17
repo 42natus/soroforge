@@ -1,0 +1,49 @@
+# Dependency review runs only on pull requests, where it can diff the
+# dependency graph against the base branch. Every step only reads the
+# repository; the action reports through its status check rather than a PR
+# comment, so no write permission (not even pull-requests: write) is needed.
+name: Dependency review
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    name: Review dependency changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Succeeds by default; a newly introduced dependency with a known
+      # vulnerability at or above the stated severity fails the check.
+      - name: Dependency review
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          # High and critical block the PR. Moderate and low are still shown in
+          # the action's output but do not fail an otherwise sound change.
+          fail-on-severity: high
+          # SoroForge ships under Apache-2.0, so the policy admits licences that
+          # can be combined with it: permissive (0BSD, Apache-2.0, BSD-2/3,
+          # BSL-1.0, ISC, MIT, MIT-0, Unlicense, Zlib, CC0-1.0) and MPL-2.0,
+          # whose file-level copyleft is Apache-2.0 compatible. Anything else
+          # fails the check, so the list stays explicit instead of disabling
+          # licence review altogether.
+          allow-licenses: >-
+            0BSD,
+            Apache-2.0,
+            BSD-2-Clause,
+            BSD-3-Clause,
+            BSL-1.0,
+            CC0-1.0,
+            ISC,
+            MIT,
+            MIT-0,
+            MPL-2.0,
+            Unlicense,
+            Zlib
