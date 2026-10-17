@@ -1,0 +1,17 @@
+{
+  // Go 1.26 and golangci-lint come from the image in docker-compose.yml, and
+  // TEST_DATABASE_URL / DATABASE_URL are set on the workspace service there.
+  // `make check` and `make test-integration` therefore run with no setup.
+  "name": "SoroForge",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "workspace",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  // Warm the module cache so the first `make check` is not a download.
+  "postCreateCommand": "go mod download",
+  "customizations": {
+    "vscode": {
+      "extensions": ["golang.go"]
+    }
+  },
+  "remoteUser": "vscode"
+}

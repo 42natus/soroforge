@@ -41,8 +41,8 @@ func (h *handlers) ready(w http.ResponseWriter, r *http.Request) {
 // deploy handles POST /v1/deploy.
 func (h *handlers) deploy(w http.ResponseWriter, r *http.Request) {
 	var req deploy.DeployRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	if err := decodeBody(w, r, &req); err != nil {
+		writeDecodeError(w, err)
 		return
 	}
 	if req.Alias == "" {
@@ -68,8 +68,8 @@ func (h *handlers) deploy(w http.ResponseWriter, r *http.Request) {
 // upgrade handles POST /v1/upgrade.
 func (h *handlers) upgrade(w http.ResponseWriter, r *http.Request) {
 	var req deploy.UpgradeRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	if err := decodeBody(w, r, &req); err != nil {
+		writeDecodeError(w, err)
 		return
 	}
 	if req.Alias == "" {

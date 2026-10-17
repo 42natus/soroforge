@@ -506,6 +506,34 @@ func TestDeployRejectsMalformedJSON(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+func TestMutatingEndpointsRejectOversizedBodies(t *testing.T) {
+	// Both payloads are tiny by design, so a body beyond the cap is refused
+	// with 413 before the service can see it — the alias field carries the
+	// oversized value so the decoder trips on the size limit rather than on
+	// an unknown field.
+	oversized := `{"alias":"` + strings.Repeat("a", 70<<10) + `"}`
+
+	for _, path := range []string{"/v1/deploy", "/v1/upgrade"} {
+		t.Run(path, func(t *testing.T) {
+			svc := &fakeService{}
+			router := newTestRouter(t, svc)
+
+			req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(oversized))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+testToken)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+
+			assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+			assert.Equal(t, 0, svc.calls, "an oversized request must never reach the service")
+
+			var body map[string]string
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			assert.NotEmpty(t, body["error"])
+		})
+	}
+}
+
 func TestUpgradeSucceeds(t *testing.T) {
 	svc := &fakeService{upgradeResult: &deploy.UpgradeResult{
 		Alias:            "counter",

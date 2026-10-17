@@ -1,0 +1,30 @@
+# The dev container layers a Go workspace on top of the repository's own
+# docker-compose.yml, which stays the single source of truth for the Postgres
+# service and its credentials.
+#
+#   VS Code / Codespaces: open the folder and choose "Reopen in Container"
+#   Plain Docker:         docker compose -f .devcontainer/docker-compose.yml up -d
+#
+# include resolves paths in each file relative to that file, so the workspace
+# mount below points at the repository root.
+include:
+  - path: ../docker-compose.yml
+
+services:
+  workspace:
+    # Kept in step with GO_VERSION in .github/workflows/ci.yml. The image
+    # also ships golangci-lint at /go/bin/golangci-lint, which `make lint`
+    # picks up.
+    image: mcr.microsoft.com/devcontainers/go:1.26-bookworm
+    command: sleep infinity
+    volumes:
+      # The repository's parent, so the checkout lands at
+      # /workspaces/<repo-name> exactly as devcontainer.json expects.
+      - ../..:/workspaces:cached
+    environment:
+      # Service DNS, not localhost: Postgres is a sibling container.
+      DATABASE_URL: postgres://soroforge:soroforge@postgres:5432/soroforge?sslmode=disable
+      TEST_DATABASE_URL: postgres://soroforge:soroforge@postgres:5432/soroforge?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy

@@ -60,6 +60,15 @@ type Readiness interface {
 // indefinitely.
 const requestTimeout = 5 * time.Minute
 
+// maxRequestBodyBytes caps the request body of the mutating endpoints.
+//
+// Deploy and upgrade bodies are a handful of small fields — an alias, a
+// network, a wasm path or hash, free-text notes — so 64 KiB leaves orders of
+// magnitude of headroom. Without a cap, an authenticated but misbehaving
+// client could make the server buffer an arbitrarily large body; with one,
+// the decoder is stopped at the limit instead.
+const maxRequestBodyBytes = 64 << 10 // 64 KiB
+
 // Options configures the HTTP server.
 type Options struct {
 	// Service performs the work. Required.
@@ -251,6 +260,16 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, errorResponse{Error: message})
 }
 
+// decodeBody caps the request body and decodes it as JSON.
+//
+// The cap is applied before json.NewDecoder reads anything, so an oversized
+// body is refused rather than buffered, and the *http.MaxBytesError it
+// produces lets writeDecodeError answer 413 instead of a generic 400.
+func decodeBody(w http.ResponseWriter, r *http.Request, dest any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	return decodeJSON(r, dest)
+}
+
 // decodeJSON reads a request body, rejecting unknown fields so that a
 // misspelled key is a clear 400 rather than a silently ignored option — the
 // same reasoning as KnownFields in the config loader.
@@ -261,6 +280,21 @@ func decodeJSON(r *http.Request, dest any) error {
 		return fmt.Errorf("invalid request body: %w", err)
 	}
 	return nil
+}
+
+// writeDecodeError writes the response for a body that could not be decoded.
+//
+// A body over the cap is a 413: the request is well-formed, just too large to
+// accept, and that is the code clients and proxies already understand for it.
+// Everything else is the 400 used for malformed JSON or an unknown field.
+func writeDecodeError(w http.ResponseWriter, err error) {
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		writeError(w, http.StatusRequestEntityTooLarge,
+			fmt.Sprintf("request body exceeds the %d byte limit", maxRequestBodyBytes))
+		return
+	}
+	writeError(w, http.StatusBadRequest, err.Error())
 }
 
 // statusForError maps an operation error to an HTTP status.

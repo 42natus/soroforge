@@ -19,6 +19,71 @@ env:
 
 jobs:
   test:
+    name: test (${{ matrix.os }})
+    # Every supported OS runs the unit suite: releases ship macOS and Windows
+    # binaries, and path handling, keystore reading and line endings all
+    # differ by platform, so a failure should surface here rather than after
+    # a tag. The Postgres half lives in the integration job below, because
+    # GitHub Actions service containers only exist on Linux.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            race: "-race"
+          - os: macos-latest
+            race: "-race"
+          # The Windows race detector needs cgo and a C toolchain, which the
+          # runner does not provide by default. The detector still runs on
+          # the other two legs of the matrix.
+          - os: windows-latest
+            race: ""
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          # Always the newest patch release: security fixes land there.
+          check-latest: true
+
+      # bash on every runner: gofmt -l . is a POSIX one-liner, and Windows
+      # would otherwise land in PowerShell with different quoting.
+      - name: Check formatting
+        shell: bash
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Verify go.mod is tidy
+        shell: bash
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test ${{ matrix.race }} -count=1 ./...
+
+  integration:
+    name: postgres integration
+    # Deliberately Linux-only: service containers are a GitHub Actions
+    # Linux-runner feature, so Postgres cannot be attached to the macOS or
+    # Windows legs. Those legs still compile and run the whole unit suite,
+    # which skips the database-gated cases; this job is what exercises them.
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -48,30 +113,10 @@ jobs:
           # Always the newest patch release: security fixes land there.
           check-latest: true
 
-      - name: Check formatting
-        run: |
-          unformatted=$(gofmt -l .)
-          if [ -n "$unformatted" ]; then
-            echo "These files are not gofmt'd:"
-            echo "$unformatted"
-            exit 1
-          fi
-
-      - name: Verify go.mod is tidy
-        run: |
-          go mod tidy
-          git diff --exit-code go.mod go.sum
-
-      - name: Vet
-        run: go vet ./...
-
-      - name: Build
-        run: go build ./...
-
       # TEST_DATABASE_URL turns on the Postgres half of the store
-      # conformance suite; without it those cases would silently skip.
-      # The live testnet smoke tests stay off: CI must not depend on a
-      # public RPC endpoint being up.
+      # conformance suite, including the migration round-trip test; without
+      # it those cases would silently skip. The live testnet smoke tests stay
+      # off: CI must not depend on a public RPC endpoint being up.
       - name: Test
         env:
           TEST_DATABASE_URL: postgres://soroforge:soroforge@localhost:5432/soroforge?sslmode=disable
