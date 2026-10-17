@@ -30,7 +30,7 @@ import (
 
 // stubService satisfies api.Service without doing any work: these tests are
 // about the transport, not the lifecycle.
-type stubService struct{}
+type stubService struct{ api.Service }
 
 type readyChecker struct{}
 
