@@ -22,6 +22,7 @@ import (
 	"github.com/soroworks/soroforge/internal/api"
 	"github.com/soroworks/soroforge/internal/config"
 	"github.com/soroworks/soroforge/internal/deploy"
+	"github.com/soroworks/soroforge/internal/readiness"
 	"github.com/soroworks/soroforge/internal/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -30,6 +31,12 @@ import (
 // stubService satisfies api.Service without doing any work: these tests are
 // about the transport, not the lifecycle.
 type stubService struct{}
+
+type readyChecker struct{}
+
+func (readyChecker) Check(context.Context) readiness.Status {
+	return readiness.Status{Ready: true}
+}
 
 func (stubService) Deploy(context.Context, deploy.DeployRequest) (*deploy.DeployResult, error) {
 	return &deploy.DeployResult{}, nil
@@ -183,9 +190,10 @@ func TestServeWithSelfSignedCertificate(t *testing.T) {
 	require.NoError(t, err)
 
 	router, err := api.NewRouter(api.Options{
-		Service: stubService{},
-		Tokens:  []string{"test-token-long-enough-to-pass"},
-		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Service:   stubService{},
+		Tokens:    []api.Token{api.NewToken("test", "test-token-long-enough-to-pass", false)},
+		Readiness: readyChecker{},
+		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
 

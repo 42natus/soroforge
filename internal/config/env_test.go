@@ -280,11 +280,9 @@ func TestLoadEnvReadsRateLimitVariables(t *testing.T) {
 	assert.Equal(t, "true", env.APITrustProxy)
 }
 
-func TestLoadEnvParsesAPITokenList(t *testing.T) {
-	// Spaces and empty entries are tolerated; a trailing comma from a script
-	// must not stop the server from starting.
-	t.Setenv(EnvAPITokens, " first-token , second-token ,, third-token ")
-	assert.Equal(t, []string{"first-token", "second-token", "third-token"}, LoadEnv().APITokens)
+func TestLoadEnvReadsScopedAPITokens(t *testing.T) {
+	t.Setenv(EnvAPITokens, " dashboard:read:token , ci:write:secret ")
+	assert.Equal(t, "dashboard:read:token , ci:write:secret", LoadEnv().APITokens)
 }
 
 func TestAPITokenList(t *testing.T) {
@@ -295,13 +293,13 @@ func TestAPITokenList(t *testing.T) {
 	t.Run("list wins over single variable", func(t *testing.T) {
 		// Documented in the README: an operator who writes the list means the
 		// list, so rotation cannot be defeated by a stale single variable.
-		env := Env{APIToken: "stale", APITokens: []string{"new", "old"}}
+		env := Env{APIToken: "stale", APITokens: "new,old"}
 		assert.Equal(t, []string{"new", "old"}, env.APITokenList())
 	})
 
 	t.Run("nothing configured", func(t *testing.T) {
 		assert.Empty(t, Env{}.APITokenList())
-		assert.Empty(t, Env{APITokens: []string{}}.APITokenList())
+		assert.Empty(t, Env{APITokens: ""}.APITokenList())
 	})
 }
 

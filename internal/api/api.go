@@ -74,18 +74,12 @@ type Options struct {
 	// Service performs the work. Required.
 	Service Service
 
-	// Tokens are the bearer credentials the API accepts. At least one is
-	// required; the server refuses to start without one.
+	// Tokens are the scoped bearer credentials the API accepts. At least one
+	// is required; the server refuses to start without one.
 	Tokens []Token
 
 	// Readiness checks dependencies for GET /ready. Required.
 	Readiness Readiness
-
-	// Tokens lists every bearer token accepted by /v1 endpoints. More than
-	// one lets operators rotate without downtime: add the new token, move
-	// clients over, then remove the old one. The server refuses to start if
-	// the resolved list is empty, any token is too short, or two are equal.
-	Tokens []string
 
 	// RateLimit bounds how often one client may call /v1. The zero value
 	// disables limiting; soroforge serve sets it from configuration, where
@@ -154,6 +148,7 @@ func NewRouter(opts Options) (http.Handler, error) {
 
 	h := &handlers{svc: opts.Service, readiness: opts.Readiness, log: log}
 	auth := &authenticator{tokens: opts.Tokens}
+	rateLimit := RateLimit(opts.RateLimit)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -164,6 +159,11 @@ func NewRouter(opts Options) (http.Handler, error) {
 	r.Use(middleware.Timeout(requestTimeout))
 
 	for _, rt := range h.routes() {
+		if strings.HasPrefix(rt.pattern, "/v1/") {
+			r.With(rateLimit, auth.authorize(rt.scope, rt.pattern)).
+				Method(rt.method, rt.pattern, rt.handler)
+			continue
+		}
 		r.With(auth.authorize(rt.scope, rt.pattern)).Method(rt.method, rt.pattern, rt.handler)
 	}
 

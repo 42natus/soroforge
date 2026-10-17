@@ -371,7 +371,12 @@ Endpoints:
 				Service:   a.service,
 				Tokens:    tokens,
 				Readiness: readinessChecker,
-				Log:       slog.Default(),
+				RateLimit: api.RateLimitOptions{
+					RequestsPerSecond: rateLimit.RequestsPerSecond,
+					Burst:             rateLimit.Burst,
+					TrustProxyHeaders: rateLimit.TrustProxyHeaders,
+				},
+				Log: slog.Default(),
 			})
 			if err != nil {
 				return err
