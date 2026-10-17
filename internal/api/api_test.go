@@ -10,7 +10,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/soroworks/soroforge/internal/api"
 	"github.com/soroworks/soroforge/internal/deploy"
@@ -122,6 +124,35 @@ func newTestRouterWithTokens(t *testing.T, svc api.Service, tokens ...string) ht
 	})
 	require.NoError(t, err)
 	return router
+}
+
+func newRateLimitedRouter(t *testing.T, svc api.Service, opts api.RateLimitOptions) http.Handler {
+	t.Helper()
+	router, err := api.NewRouter(api.Options{
+		Service:   svc,
+		Token:     testToken,
+		RateLimit: opts,
+		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	return router
+}
+
+// doFrom issues an authenticated request from a specific client address, so
+// per-client behaviour can be observed.
+func doFrom(t *testing.T, router http.Handler, remoteAddr, xff, path string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.RemoteAddr = remoteAddr
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	if xff != "" {
+		req.Header.Set("X-Forwarded-For", xff)
+	}
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec
 }
 
 // do issues a request with the valid bearer token unless token is overridden.
@@ -551,4 +582,106 @@ func TestStatusAllRequiresAuth(t *testing.T) {
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestRateLimitTriggersAndResets(t *testing.T) {
+	// 5 requests/second with a burst of 1: the second immediate request is
+	// refused, and the bucket refills within ~200ms.
+	router := newRateLimitedRouter(t, &fakeService{contracts: []store.Contract{}},
+		api.RateLimitOptions{RequestsPerSecond: 5, Burst: 1})
+
+	first := do(t, router, http.MethodGet, "/v1/contracts", nil, nil)
+	require.Equal(t, http.StatusOK, first.Code)
+
+	second := do(t, router, http.MethodGet, "/v1/contracts", nil, nil)
+	require.Equal(t, http.StatusTooManyRequests, second.Code)
+
+	// 429 with a Retry-After telling the client how long to wait.
+	retryAfter := second.Header().Get("Retry-After")
+	require.NotEmpty(t, retryAfter)
+	seconds, err := strconv.Atoi(retryAfter)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, seconds, 1)
+
+	// Every failure returns the same JSON shape as the rest of the API.
+	var body map[string]string
+	require.NoError(t, json.Unmarshal(second.Body.Bytes(), &body))
+	assert.NotEmpty(t, body["error"])
+	assert.Contains(t, second.Header().Get("Content-Type"), "application/json")
+
+	// The limit resets: one token refills in 200ms.
+	time.Sleep(250 * time.Millisecond)
+
+	third := do(t, router, http.MethodGet, "/v1/contracts", nil, nil)
+	assert.Equal(t, http.StatusOK, third.Code)
+}
+
+func TestHealthIsNeverRateLimited(t *testing.T) {
+	router := newRateLimitedRouter(t, &fakeService{},
+		api.RateLimitOptions{RequestsPerSecond: 1, Burst: 1})
+
+	// Exhaust the /v1 budget for this client.
+	require.Equal(t, http.StatusOK,
+		do(t, router, http.MethodGet, "/v1/contracts", nil, nil).Code)
+	require.Equal(t, http.StatusTooManyRequests,
+		do(t, router, http.MethodGet, "/v1/contracts", nil, nil).Code)
+
+	// /health is a liveness probe: a caller over its limit must still be able
+	// to learn the server is alive.
+	for i := 0; i < 5; i++ {
+		assert.Equal(t, http.StatusOK,
+			do(t, router, http.MethodGet, "/health", nil, nil).Code)
+	}
+}
+
+func TestRateLimitIsPerClient(t *testing.T) {
+	router := newRateLimitedRouter(t, &fakeService{contracts: []store.Contract{}},
+		api.RateLimitOptions{RequestsPerSecond: 1, Burst: 1})
+
+	assert.Equal(t, http.StatusOK,
+		doFrom(t, router, "198.51.100.7:1234", "", "/v1/contracts").Code)
+
+	// Same address, different source port: still the same client.
+	assert.Equal(t, http.StatusTooManyRequests,
+		doFrom(t, router, "198.51.100.7:5678", "", "/v1/contracts").Code)
+
+	// A different address has its own budget.
+	assert.Equal(t, http.StatusOK,
+		doFrom(t, router, "198.51.100.8:1234", "", "/v1/contracts").Code)
+}
+
+func TestRateLimitReadsForwardedForOnlyWhenTrusted(t *testing.T) {
+	t.Run("untrusted header is ignored", func(t *testing.T) {
+		// Without the opt-in, a client cannot mint itself a fresh bucket by
+		// forging X-Forwarded-For.
+		router := newRateLimitedRouter(t, &fakeService{contracts: []store.Contract{}},
+			api.RateLimitOptions{RequestsPerSecond: 1, Burst: 1})
+
+		assert.Equal(t, http.StatusOK,
+			doFrom(t, router, "192.0.2.10:4321", "203.0.113.1", "/v1/contracts").Code)
+		assert.Equal(t, http.StatusTooManyRequests,
+			doFrom(t, router, "192.0.2.10:4321", "203.0.113.2", "/v1/contracts").Code)
+	})
+
+	t.Run("trusted header separates clients behind a proxy", func(t *testing.T) {
+		router := newRateLimitedRouter(t, &fakeService{contracts: []store.Contract{}},
+			api.RateLimitOptions{RequestsPerSecond: 1, Burst: 1, TrustProxyHeaders: true})
+
+		assert.Equal(t, http.StatusOK,
+			doFrom(t, router, "192.0.2.10:4321", "203.0.113.1", "/v1/contracts").Code)
+		assert.Equal(t, http.StatusOK,
+			doFrom(t, router, "192.0.2.10:4321", "203.0.113.2", "/v1/contracts").Code)
+		assert.Equal(t, http.StatusTooManyRequests,
+			doFrom(t, router, "192.0.2.10:4321", "203.0.113.1", "/v1/contracts").Code)
+	})
+}
+
+func TestRateLimitDisabledByDefaultAtTheRouterLayer(t *testing.T) {
+	// The zero value keeps NewRouter's previous behaviour; serve opts in from
+	// configuration, where the documented defaults live.
+	router := newTestRouter(t, &fakeService{contracts: []store.Contract{}})
+
+	for i := 0; i < 30; i++ {
+		require.Equal(t, http.StatusOK, do(t, router, http.MethodGet, "/v1/contracts", nil, nil).Code)
+	}
 }

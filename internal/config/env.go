@@ -2,8 +2,10 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -47,6 +49,35 @@ const (
 
 	// EnvAPIAddr overrides the HTTP API listen address.
 	EnvAPIAddr = "SOROFORGE_API_ADDR"
+
+	// EnvAPIRateLimit is the sustained per-client request rate for the HTTP
+	// API, in requests per second. Unset means DefaultAPIRateLimit; 0 disables
+	// limiting (documented, and intended for deployments that limit upstream).
+	EnvAPIRateLimit = "SOROFORGE_API_RATE_LIMIT"
+
+	// EnvAPIRateBurst is how many requests a client may make at once before
+	// EnvAPIRateLimit applies. Unset means DefaultAPIRateBurst.
+	EnvAPIRateBurst = "SOROFORGE_API_RATE_BURST"
+
+	// EnvAPITrustProxy makes the rate limiter take the client IP from
+	// X-Forwarded-For. Enable it only when a reverse proxy you control is the
+	// sole way in: the header is otherwise client-controlled, so trusting it
+	// lets a client dodge the limit by forging it, or frame another client by
+	// naming their address.
+	EnvAPITrustProxy = "SOROFORGE_API_TRUST_PROXY"
+)
+
+// Rate limiting defaults. They are generous enough that a well-behaved CI
+// pipeline never notices, but bound what a leaked token or a runaway loop can
+// do: every /v1 call can trigger RPC traffic, and some deploy contracts.
+const (
+	// DefaultAPIRateLimit is the sustained per-client rate in requests per
+	// second, applied when SOROFORGE_API_RATE_LIMIT is unset.
+	DefaultAPIRateLimit = 10.0
+
+	// DefaultAPIRateBurst is the per-client burst, applied when
+	// SOROFORGE_API_RATE_BURST is unset.
+	DefaultAPIRateBurst = 20
 )
 
 // DefaultAPIAddr is the listen address used when EnvAPIAddr is unset.
@@ -69,6 +100,10 @@ type Env struct {
 	APITokens    []string
 	APIAddr      string
 
+	APIRateLimit  string
+	APIRateBurst  string
+	APITrustProxy string
+
 	// AllowInsecureKeystore accepts a keystore readable by group or others.
 	// See EnvAllowInsecureKeystore.
 	AllowInsecureKeystore bool
@@ -86,6 +121,9 @@ func LoadEnv() Env {
 		APIToken:              os.Getenv(EnvAPIToken),
 		APITokens:             splitTokens(os.Getenv(EnvAPITokens)),
 		APIAddr:               strings.TrimSpace(os.Getenv(EnvAPIAddr)),
+		APIRateLimit:          strings.TrimSpace(os.Getenv(EnvAPIRateLimit)),
+		APIRateBurst:          strings.TrimSpace(os.Getenv(EnvAPIRateBurst)),
+		APITrustProxy:         strings.TrimSpace(os.Getenv(EnvAPITrustProxy)),
 	}
 }
 
@@ -104,6 +142,74 @@ func (e Env) ListenAddr() string {
 		return DefaultAPIAddr
 	}
 	return e.APIAddr
+}
+
+// RateLimitConfig is the resolved per-client rate limit for the HTTP API.
+type RateLimitConfig struct {
+	// RequestsPerSecond is the sustained per-client rate. Zero disables
+	// limiting.
+	RequestsPerSecond float64
+
+	// Burst is how many requests a client may make at once. Zero when
+	// limiting is disabled.
+	Burst int
+
+	// TrustProxyHeaders makes the limiter read the client IP from
+	// X-Forwarded-For instead of the connection's remote address.
+	TrustProxyHeaders bool
+}
+
+// RateLimit returns the resolved rate limit configuration.
+//
+// Malformed values are errors rather than silent fallbacks: a typo in
+// SOROFORGE_API_RATE_LIMIT that quietly disabled limiting would be the exact
+// failure this feature exists to prevent.
+func (e Env) RateLimit() (RateLimitConfig, error) {
+	cfg := RateLimitConfig{
+		RequestsPerSecond: DefaultAPIRateLimit,
+		Burst:             DefaultAPIRateBurst,
+	}
+
+	if raw := e.APIRateLimit; raw != "" {
+		rps, err := strconv.ParseFloat(raw, 64)
+		if err != nil || math.IsNaN(rps) || math.IsInf(rps, 0) {
+			return RateLimitConfig{}, fmt.Errorf("%s=%q is not a number", EnvAPIRateLimit, raw)
+		}
+		if rps < 0 {
+			return RateLimitConfig{}, fmt.Errorf(
+				"%s must be 0 (disabled) or a positive number of requests per second, got %g",
+				EnvAPIRateLimit, rps)
+		}
+		cfg.RequestsPerSecond = rps
+	}
+
+	if raw := e.APIRateBurst; raw != "" {
+		burst, err := strconv.Atoi(raw)
+		if err != nil {
+			return RateLimitConfig{}, fmt.Errorf("%s=%q is not a whole number", EnvAPIRateBurst, raw)
+		}
+		if burst < 1 {
+			return RateLimitConfig{}, fmt.Errorf("%s must be at least 1, got %d", EnvAPIRateBurst, burst)
+		}
+		cfg.Burst = burst
+	}
+
+	if raw := e.APITrustProxy; raw != "" {
+		trust, err := strconv.ParseBool(raw)
+		if err != nil {
+			return RateLimitConfig{}, fmt.Errorf(
+				"%s=%q is not a boolean (true or false)", EnvAPITrustProxy, raw)
+		}
+		cfg.TrustProxyHeaders = trust
+	}
+
+	// A disabled limit ignores burst; report that rather than a value the
+	// consumer might mistakenly apply.
+	if cfg.RequestsPerSecond == 0 {
+		cfg.Burst = 0
+	}
+
+	return cfg, nil
 }
 
 // APITokenList returns every configured API token, in the order they appear.
@@ -209,7 +315,17 @@ func (e Env) Redacted() map[string]string {
 		EnvAPIToken:              redact(e.APIToken),
 		EnvAPITokens:             redactList(e.APITokens),
 		EnvAPIAddr:               e.ListenAddr(),
+		EnvAPIRateLimit:          orDefault(e.APIRateLimit, "(default)"),
+		EnvAPIRateBurst:          orDefault(e.APIRateBurst, "(default)"),
+		EnvAPITrustProxy:         orDefault(e.APITrustProxy, "false"),
 	}
+}
+
+func orDefault(v, fallback string) string {
+	if v == "" {
+		return fallback
+	}
+	return v
 }
 
 func redact(v string) string {

@@ -177,6 +177,69 @@ func TestSigningSeedErrors(t *testing.T) {
 	})
 }
 
+func TestRateLimitDefaults(t *testing.T) {
+	// Sane defaults: limiting is on unless deliberately turned off, because
+	// the API holds a signing key and every call can move value.
+	cfg, err := Env{}.RateLimit()
+	require.NoError(t, err)
+	assert.Equal(t, DefaultAPIRateLimit, cfg.RequestsPerSecond)
+	assert.Equal(t, DefaultAPIRateBurst, cfg.Burst)
+	assert.False(t, cfg.TrustProxyHeaders)
+}
+
+func TestRateLimitParsesValues(t *testing.T) {
+	cfg, err := Env{
+		APIRateLimit:  "2.5",
+		APIRateBurst:  "7",
+		APITrustProxy: "true",
+	}.RateLimit()
+	require.NoError(t, err)
+	assert.Equal(t, 2.5, cfg.RequestsPerSecond)
+	assert.Equal(t, 7, cfg.Burst)
+	assert.True(t, cfg.TrustProxyHeaders)
+}
+
+func TestRateLimitZeroDisables(t *testing.T) {
+	cfg, err := Env{APIRateLimit: "0", APIRateBurst: "7"}.RateLimit()
+	require.NoError(t, err)
+	assert.Zero(t, cfg.RequestsPerSecond)
+	// The burst is meaningless when limiting is off; report it as such rather
+	// than a value a consumer might apply.
+	assert.Zero(t, cfg.Burst)
+}
+
+func TestRateLimitRejectsMalformedValues(t *testing.T) {
+	// A typo must stop the server rather than quietly disable a security
+	// control.
+	tests := map[string]Env{
+		"rate not a number":    {APIRateLimit: "fast"},
+		"rate negative":        {APIRateLimit: "-1"},
+		"rate not finite":      {APIRateLimit: "NaN"},
+		"burst not a number":   {APIRateBurst: "many"},
+		"burst zero":           {APIRateBurst: "0"},
+		"burst negative":       {APIRateBurst: "-5"},
+		"trust proxy not bool": {APITrustProxy: "maybe"},
+	}
+
+	for name, env := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := env.RateLimit()
+			assert.Error(t, err)
+		})
+	}
+}
+
+func TestLoadEnvReadsRateLimitVariables(t *testing.T) {
+	t.Setenv(EnvAPIRateLimit, " 3.5 ")
+	t.Setenv(EnvAPIRateBurst, "9")
+	t.Setenv(EnvAPITrustProxy, "true")
+
+	env := LoadEnv()
+	assert.Equal(t, "3.5", env.APIRateLimit)
+	assert.Equal(t, "9", env.APIRateBurst)
+	assert.Equal(t, "true", env.APITrustProxy)
+}
+
 func TestLoadEnvParsesAPITokenList(t *testing.T) {
 	// Spaces and empty entries are tolerated; a trailing comma from a script
 	// must not stop the server from starting.

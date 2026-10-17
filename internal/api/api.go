@@ -63,6 +63,11 @@ type Options struct {
 	// the resolved list is empty, any token is too short, or two are equal.
 	Tokens []string
 
+	// RateLimit bounds how often one client may call /v1. The zero value
+	// disables limiting; soroforge serve sets it from configuration, where
+	// the documented defaults live.
+	RateLimit RateLimitOptions
+
 	// Log defaults to slog.Default().
 	Log *slog.Logger
 }
@@ -101,6 +106,10 @@ func NewRouter(opts Options) (http.Handler, error) {
 	r.Get("/health", h.health)
 
 	r.Route("/v1", func(r chi.Router) {
+		// Before authentication on purpose: unauthenticated floods count
+		// against the same per-client budget, so the limiter also bounds
+		// token-guessing against the auth middleware.
+		r.Use(RateLimit(opts.RateLimit))
 		r.Use(BearerAuthTokens(tokens))
 
 		r.Post("/deploy", h.deploy)

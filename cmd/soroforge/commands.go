@@ -283,10 +283,20 @@ Endpoints:
 				listenAddr = a.cfg.Env.ListenAddr()
 			}
 
+			rateLimit, err := a.cfg.Env.RateLimit()
+			if err != nil {
+				return err
+			}
+
 			handler, err := api.NewRouter(api.Options{
 				Service: a.service,
 				Tokens:  a.cfg.Env.APITokenList(),
-				Log:     slog.Default(),
+				RateLimit: api.RateLimitOptions{
+					RequestsPerSecond: rateLimit.RequestsPerSecond,
+					Burst:             rateLimit.Burst,
+					TrustProxyHeaders: rateLimit.TrustProxyHeaders,
+				},
+				Log: slog.Default(),
 			})
 			if err != nil {
 				return err
