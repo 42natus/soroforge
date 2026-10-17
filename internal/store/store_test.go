@@ -214,6 +214,28 @@ func runStoreSuite(t *testing.T, newStore func(t *testing.T) store.Store) {
 		assert.Empty(t, history[0].Notes)
 	})
 
+	t.Run("an upload is recorded without a contract id", func(t *testing.T) {
+		// Uploading installs bytecode, which has no contract address of its
+		// own. The record must round-trip with the field empty and still appear
+		// in the alias's history.
+		s := newStore(t)
+
+		_, err := s.RecordDeployment(ctx, store.Deployment{
+			Alias: "counter", Network: "testnet", WasmHash: "c0ffee",
+			Action: store.ActionUpload, DeployerPubkey: "GABC",
+			TxHash: "tx-upload", Ledger: 300,
+		})
+		require.NoError(t, err)
+
+		history, err := s.History(ctx, "testnet", "counter")
+		require.NoError(t, err)
+		require.Len(t, history, 1)
+		assert.Equal(t, store.ActionUpload, history[0].Action)
+		assert.Empty(t, history[0].ContractID)
+		assert.Equal(t, "tx-upload", history[0].TxHash)
+		assert.Equal(t, uint32(300), history[0].Ledger)
+	})
+
 	t.Run("invalid records are rejected", func(t *testing.T) {
 		s := newStore(t)
 
@@ -263,6 +285,7 @@ func TestMemoryStoreHistoryOrdersByIDWhenTimestampsTie(t *testing.T) {
 func TestActionValid(t *testing.T) {
 	assert.True(t, store.ActionDeploy.Valid())
 	assert.True(t, store.ActionUpgrade.Valid())
+	assert.True(t, store.ActionUpload.Valid())
 	assert.False(t, store.Action("rollback").Valid())
 	assert.False(t, store.Action("").Valid())
 }
@@ -288,4 +311,13 @@ func TestDeploymentValidate(t *testing.T) {
 			assert.ErrorContains(t, d.Validate(), field)
 		})
 	}
+
+	t.Run("an upload may omit contract_id", func(t *testing.T) {
+		// Bytecode is content-addressed by its wasm hash; there is no contract
+		// address to record until a deploy or upgrade names one.
+		upload := valid
+		upload.Action = store.ActionUpload
+		upload.ContractID = ""
+		assert.NoError(t, upload.Validate())
+	})
 }

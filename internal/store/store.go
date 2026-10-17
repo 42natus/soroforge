@@ -3,7 +3,7 @@
 // The history is the point of the tool: it answers "which WASM hash is live on
 // which network, and who put it there" long after the terminal that ran the
 // deploy is gone. Two tables back that — contracts holds current state, and
-// deployments is an append-only log of every deploy and upgrade.
+// deployments is an append-only log of every deploy, upgrade, and upload.
 //
 // Everything is namespaced by network. A contract alias means nothing on its
 // own; "counter on testnet" and "counter on mainnet" are separate records with
@@ -33,12 +33,18 @@ const (
 	// ActionUpgrade replaces the bytecode of an already-deployed contract,
 	// keeping its address.
 	ActionUpgrade Action = "upgrade"
+
+	// ActionUpload installs bytecode on-chain without deploying or upgrading:
+	// the first half of a governance-driven upgrade, where the hash goes into
+	// a proposal and a separate party later calls the contract's upgrade
+	// function. No contract exists yet, so the record has no contract id.
+	ActionUpload Action = "upload"
 )
 
 // Valid reports whether a is a recognised action. The database enforces this
 // too; checking here produces a better error than a constraint violation.
 func (a Action) Valid() bool {
-	return a == ActionDeploy || a == ActionUpgrade
+	return a == ActionDeploy || a == ActionUpgrade || a == ActionUpload
 }
 
 func (a Action) String() string { return string(a) }
@@ -118,13 +124,15 @@ func (d Deployment) Validate() error {
 		return fmt.Errorf("deployment: alias is required")
 	case d.Network == "":
 		return fmt.Errorf("deployment: network is required")
-	case d.ContractID == "":
+	// An upload installs bytecode, which is content-addressed by its wasm hash
+	// and has no contract address; only a deploy or upgrade names a contract.
+	case d.ContractID == "" && d.Action != ActionUpload:
 		return fmt.Errorf("deployment: contract_id is required")
 	case d.WasmHash == "":
 		return fmt.Errorf("deployment: wasm_hash is required")
 	case !d.Action.Valid():
-		return fmt.Errorf("deployment: action must be %q or %q, got %q",
-			ActionDeploy, ActionUpgrade, d.Action)
+		return fmt.Errorf("deployment: action must be %q, %q, or %q, got %q",
+			ActionDeploy, ActionUpgrade, ActionUpload, d.Action)
 	case d.DeployerPubkey == "":
 		return fmt.Errorf("deployment: deployer_pubkey is required")
 	}

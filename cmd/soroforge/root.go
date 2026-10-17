@@ -62,6 +62,7 @@ The secret key is never logged, stored, or printed. See the README security note
 		newInitCmd(),
 		newDeployCmd(),
 		newUpgradeCmd(),
+		newUploadCmd(),
 		newListCmd(),
 		newHistoryCmd(),
 		newStatusCmd(),

@@ -102,25 +102,16 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 		DryRun:   req.DryRun,
 	}
 
-	// Step 1: upload the bytecode, unless it is already on-chain. Uploading is
-	// content-addressed, so an identical upload is a no-op that still costs a
-	// transaction and a fee.
-	uploaded, err := stellar.WasmUploaded(ctx, r.Client, wasmHash)
+	// Step 1: upload the bytecode, unless it is already on-chain.
+	upload, skipped, err := s.uploadBytecode(ctx, r, signer, wasm, req.DryRun, log)
 	if err != nil {
-		return nil, fmt.Errorf("check whether wasm is already uploaded: %w", err)
+		return nil, err
 	}
-	if uploaded {
-		log.Info("wasm already on-chain, skipping upload")
+	if skipped {
 		result.UploadSkipped = true
 	} else {
-		upload, err := s.runTransaction(ctx, r,
-			stellar.UploadWasmOp(wasm, signer.Address()), req.DryRun)
-		if err != nil {
-			return nil, fmt.Errorf("upload wasm: %w", err)
-		}
 		result.UploadTxHash = upload.Hash
 		result.UploadEnvelopeXDR = upload.EnvelopeXDR
-		log.Info("wasm uploaded", "tx_hash", upload.Hash)
 	}
 
 	// Step 2: instantiate a contract from the uploaded bytecode.

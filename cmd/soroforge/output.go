@@ -130,6 +130,48 @@ func printUpgradeResult(r *deploy.UpgradeResult) error {
 	return nil
 }
 
+func printUploadResult(r *deploy.UploadResult) error {
+	if flags.jsonOutput {
+		return printJSON(r)
+	}
+
+	w := out()
+
+	if r.UploadSkipped {
+		fmt.Fprintf(w, "%s's bytecode is already on-chain on %s — nothing to upload.\n\n",
+			r.Alias, r.Network)
+		fmt.Fprintf(w, "  WASM hash     %s\n", r.WasmHash)
+		fmt.Fprintf(w, "  Deployer      %s\n", r.Deployer)
+		return nil
+	}
+
+	if r.DryRun {
+		fmt.Fprintf(w, "Dry run — nothing was submitted and nothing was recorded.\n\n")
+	} else {
+		fmt.Fprintf(w, "Uploaded %s's bytecode to %s.\n\n", r.Alias, r.Network)
+	}
+
+	fmt.Fprintf(w, "  WASM hash     %s\n", r.WasmHash)
+	fmt.Fprintf(w, "  Network       %s\n", r.Network)
+	fmt.Fprintf(w, "  Deployer      %s\n", r.Deployer)
+	if r.MinResourceFee != 0 {
+		fmt.Fprintf(w, "  Resource fee  %d stroops\n", r.MinResourceFee)
+	}
+	if r.UploadTxHash != "" {
+		fmt.Fprintf(w, "  Upload tx     %s\n", r.UploadTxHash)
+	}
+	if r.Ledger != 0 {
+		fmt.Fprintf(w, "  Ledger        %d\n", r.Ledger)
+	}
+
+	if r.DryRun && r.UploadEnvelopeXDR != "" {
+		fmt.Fprintf(w, "\nAssembled upload envelope (unsigned):\n\n  %s\n", r.UploadEnvelopeXDR)
+		fmt.Fprintf(w, "\nRe-run without --dry-run to submit.\n")
+	}
+
+	return nil
+}
+
 // printCatalog reports SoroVault registration. A failure is shown as a
 // warning, not an error: the deploy itself succeeded and is recorded.
 func printCatalog(w io.Writer, c *deploy.CatalogStatus) {

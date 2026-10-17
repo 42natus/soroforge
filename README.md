@@ -285,6 +285,7 @@ Output goes to stdout and logs to stderr, so `--json` output stays pipeable.
 | `init` | Write a starter `soroforge.yaml` for the contracts built under `target/`. |
 | `deploy <alias>` | Upload WASM, instantiate the contract, record it. |
 | `upgrade <alias>` | Upload new WASM and invoke the contract's upgrade entrypoint. |
+| `upload <alias>` | Install WASM on-chain without deploying or upgrading; prints the hash for a governance proposal. |
 | `list` | List tracked contracts; `--network` filters. |
 | `history <alias>` | Show a contract's full deploy/upgrade timeline, newest first. |
 | `status <alias>` | Compare the on-chain WASM hash against the recorded one. |
@@ -293,7 +294,7 @@ Output goes to stdout and logs to stderr, so `--json` output stays pipeable.
 | `migrate up\|down\|version` | Manage the schema. |
 | `version` | Print the SoroForge version. |
 
-`deploy` and `upgrade` accept `--dry-run` and `--notes`.
+`deploy`, `upgrade`, and `upload` accept `--dry-run` and `--notes`.
 
 **`--dry-run`** runs everything up to and including simulation and assembly,
 then stops. It prints the assembled envelopes and the resulting contract
