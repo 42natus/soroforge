@@ -27,6 +27,13 @@ const (
 	testReadOnlyToken = "read-only-token-long-enough"
 )
 
+// Rotation tests need two distinct tokens and one that matches neither.
+const (
+	testTokenA = "test-token-rotation-old-0001"
+	testTokenB = "test-token-rotation-new-0002"
+	testTokenC = "test-token-rotation-nope-0003"
+)
+
 // fakeService records calls and returns canned results, so the handlers are
 // tested for what they do with HTTP rather than for lifecycle behaviour — that
 // is covered in the deploy package.
@@ -501,6 +508,27 @@ func TestReadOnlyTokenIsReportedAsForbiddenNotUnauthorized(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 	assert.Empty(t, rec.Header().Get("WWW-Authenticate"),
 		"WWW-Authenticate belongs on 401 only; the caller already authenticated")
+}
+
+func TestRateLimitAppliesToVersionedRoutesButNotHealth(t *testing.T) {
+	svc := &fakeService{}
+	router, err := api.NewRouter(api.Options{
+		Service:   svc,
+		Tokens:    testTokens(),
+		Readiness: healthyReadiness{},
+		RateLimit: api.RateLimitOptions{RequestsPerSecond: 1, Burst: 1},
+	})
+	require.NoError(t, err)
+
+	first := do(t, router, http.MethodGet, "/v1/contracts?network=testnet", nil, nil)
+	require.Equal(t, http.StatusOK, first.Code)
+
+	second := do(t, router, http.MethodGet, "/v1/contracts?network=testnet", nil, nil)
+	assert.Equal(t, http.StatusTooManyRequests, second.Code)
+	assert.Equal(t, "1", second.Header().Get("Retry-After"))
+
+	health := do(t, router, http.MethodGet, "/health", nil, nil)
+	assert.Equal(t, http.StatusOK, health.Code)
 }
 
 func TestParseTokens(t *testing.T) {

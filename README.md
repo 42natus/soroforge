@@ -287,9 +287,14 @@ contracts:
 | `DATABASE_URL` | Postgres connection string. Required except for `deploy --dry-run`. |
 | `SOROFORGE_SECRET_KEY` | Deployer secret seed (`S...`). |
 | `SOROFORGE_KEYSTORE_PATH` | Path to a file containing only the seed. |
+| `SOROFORGE_ALLOW_INSECURE_KEYSTORE` | Set to `1` to allow keystore files readable by group or others. |
 | `SOROFORGE_API_TOKEN` | Read-write bearer token for `serve`. |
 | `SOROFORGE_API_TOKENS` | Scoped bearer tokens for `serve`, as `name:scope:token` entries — see below. |
 | `SOROFORGE_API_ADDR` | Listen address (default `127.0.0.1:8080`). |
+| `SOROFORGE_TLS_CERT` / `SOROFORGE_TLS_KEY` | PEM certificate and matching private-key paths; must be set together. |
+| `SOROFORGE_API_RATE_LIMIT` | Sustained per-client API rate (default `10` requests/second; `0` disables). |
+| `SOROFORGE_API_RATE_BURST` | Per-client burst (default `20`). |
+| `SOROFORGE_API_TRUST_PROXY` | Set to `true` to use `X-Forwarded-For` for client IPs; only for a trusted proxy. |
 | `SOROFORGE_LOG_FORMAT` | `text` (default) or `json`; same as `--log-format`. |
 | `SOROFORGE_CONFIG` | Config file path (default `./soroforge.yaml`). |
 | `TEST_DATABASE_URL` | Enables Postgres integration tests. |
@@ -394,6 +399,18 @@ A valid token that lacks the required scope gets **403 Forbidden**, not 401:
 the credential is real, the operation simply isn't permitted. A missing or
 unknown token is **401 Unauthorized**.
 
+The API binds to loopback by default. To serve TLS directly, configure both
+`SOROFORGE_TLS_CERT` and `SOROFORGE_TLS_KEY` (or pass `--tls-cert` and
+`--tls-key`). Configuring only one is an error; TLS uses a minimum version of
+1.2. Serving plaintext on a non-loopback address logs a warning.
+
+Requests to `/v1` are limited per client to 10 requests per second with a burst
+of 20 by default. Set `SOROFORGE_API_RATE_LIMIT=0` to disable the limit, or
+adjust `SOROFORGE_API_RATE_BURST`; rejected requests receive `429` and
+`Retry-After`. The client IP comes from the connection by default.
+`SOROFORGE_API_TRUST_PROXY=true` opts into the first `X-Forwarded-For` address
+and must only be used when a trusted reverse proxy is the sole entry point.
+
 | Method | Path | Scope | Description |
 |---|---|---|---|
 | `GET` | `/health` | public | Liveness. Process up; dependencies not checked. |
@@ -455,6 +472,15 @@ manage keys** — that's deliberate, and out of scope.
 include it in `--json` output or API responses, or echo it in an error message —
 a malformed seed is still a secret, and errors end up in CI logs.
 `Env.Redacted()` reports every secret as `(set)`/`(unset)`.
+
+**Keystore permissions:** on Unix, a keystore readable by group or others is
+refused before it is read, with an error naming the file, its mode, and the
+`chmod 600` fix. This mirrors SSH, which refuses private keys in that state for
+the same reason: a key that signs mainnet deploys must not be readable by every
+account on a shared machine. Windows has no POSIX permission bits, so the check
+is skipped there. Environments that mount secrets at a fixed mode the operator
+cannot change can set `SOROFORGE_ALLOW_INSECURE_KEYSTORE=1` to accept the risk
+deliberately — the permission error itself names that option.
 
 **Recommendations:**
 
