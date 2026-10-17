@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 )
 
@@ -27,6 +28,12 @@ const (
 	// environment variable is readable by every child process and tends to end
 	// up in shell history.
 	EnvKeystorePath = "SOROFORGE_KEYSTORE_PATH"
+
+	// EnvAllowInsecureKeystore disables the keystore permission check. It
+	// exists for environments that mount secrets with modes the operator
+	// cannot change, such as some container secret mounts. Set it to 1 (or
+	// true) deliberately; the default is to refuse.
+	EnvAllowInsecureKeystore = "SOROFORGE_ALLOW_INSECURE_KEYSTORE"
 
 	// EnvAPIToken is the bearer token required by the HTTP API. The server
 	// refuses to start when it is unset.
@@ -54,6 +61,10 @@ type Env struct {
 	KeystorePath string
 	APIToken     string
 	APIAddr      string
+
+	// AllowInsecureKeystore accepts a keystore readable by group or others.
+	// See EnvAllowInsecureKeystore.
+	AllowInsecureKeystore bool
 }
 
 // LoadEnv reads SoroForge's environment variables. It does not validate them:
@@ -61,11 +72,12 @@ type Env struct {
 // via RequireDatabaseURL or SigningSeed.
 func LoadEnv() Env {
 	return Env{
-		DatabaseURL:  strings.TrimSpace(os.Getenv(EnvDatabaseURL)),
-		SecretKey:    strings.TrimSpace(os.Getenv(EnvSecretKey)),
-		KeystorePath: strings.TrimSpace(os.Getenv(EnvKeystorePath)),
-		APIToken:     os.Getenv(EnvAPIToken),
-		APIAddr:      strings.TrimSpace(os.Getenv(EnvAPIAddr)),
+		DatabaseURL:           strings.TrimSpace(os.Getenv(EnvDatabaseURL)),
+		SecretKey:             strings.TrimSpace(os.Getenv(EnvSecretKey)),
+		KeystorePath:          strings.TrimSpace(os.Getenv(EnvKeystorePath)),
+		AllowInsecureKeystore: envBool(os.Getenv(EnvAllowInsecureKeystore)),
+		APIToken:              os.Getenv(EnvAPIToken),
+		APIAddr:               strings.TrimSpace(os.Getenv(EnvAPIAddr)),
 	}
 }
 
@@ -102,6 +114,10 @@ func (e Env) SigningSeed() (seed string, source string, err error) {
 	}
 
 	if e.KeystorePath != "" {
+		if err := checkKeystorePermissions(e.KeystorePath, e.AllowInsecureKeystore); err != nil {
+			return "", "", err
+		}
+
 		raw, err := os.ReadFile(e.KeystorePath)
 		if err != nil {
 			return "", "", fmt.Errorf("read keystore %s: %w", e.KeystorePath, err)
@@ -121,6 +137,37 @@ func (e Env) SigningSeed() (seed string, source string, err error) {
 	)
 }
 
+// checkKeystorePermissions refuses a keystore that group or other can read.
+//
+// A keystore holds a seed that may sign mainnet deploys, and the README asks
+// for mode 0600 for exactly that reason; reading the file regardless would let
+// an accidental `chmod 644` quietly leak the key to every account on the
+// machine. SSH refuses private keys in this state for the same reason. The
+// error names the file, its mode, and the fix — never the file's contents.
+//
+// Windows has no POSIX permission bits, so the check is skipped there.
+// allowInsecure is the documented escape hatch for environments that mount
+// secrets with modes the operator cannot change (see EnvAllowInsecureKeystore).
+func checkKeystorePermissions(path string, allowInsecure bool) error {
+	if runtime.GOOS == "windows" || allowInsecure {
+		return nil
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("read keystore %s: %w", path, err)
+	}
+
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return fmt.Errorf(
+			"keystore %s is mode %04o: readable by group or others, so anyone on "+
+				"this machine can read the deployer seed that signs deploys. Run "+
+				"`chmod 600 %s` to fix it, or set %s=1 to accept the risk deliberately",
+			path, perm, path, EnvAllowInsecureKeystore)
+	}
+	return nil
+}
+
 // HasSigningKey reports whether a signing key source is configured. Read-only
 // commands use it to give a clear error instead of failing deeper in the stack.
 func (e Env) HasSigningKey() bool {
@@ -134,8 +181,11 @@ func (e Env) Redacted() map[string]string {
 		EnvDatabaseURL:  redact(e.DatabaseURL),
 		EnvSecretKey:    redact(e.SecretKey),
 		EnvKeystorePath: e.KeystorePath, // a path is not itself a secret
-		EnvAPIToken:     redact(e.APIToken),
-		EnvAPIAddr:      e.ListenAddr(),
+		// The flag is security-relevant, so diagnostics should show whether
+		// the permission check was explicitly waived.
+		EnvAllowInsecureKeystore: fmt.Sprintf("%t", e.AllowInsecureKeystore),
+		EnvAPIToken:              redact(e.APIToken),
+		EnvAPIAddr:               e.ListenAddr(),
 	}
 }
 
@@ -144,4 +194,18 @@ func redact(v string) string {
 		return "(unset)"
 	}
 	return "(set)"
+}
+
+// envBool reports whether an environment variable is set to a truthy value.
+//
+// It is deliberately strict about what counts as true: anything unrecognised
+// leaves the safe default (the permission check) in place, so a typo cannot
+// silently disable a security control.
+func envBool(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes":
+		return true
+	default:
+		return false
+	}
 }

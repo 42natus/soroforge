@@ -1,13 +1,25 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// writeKeystore writes data at an explicit mode, bypassing umask effects so
+// the permission tests mean what they say.
+func writeKeystore(t *testing.T, mode os.FileMode, data string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "deployer.key")
+	require.NoError(t, os.WriteFile(path, []byte(data), 0o600))
+	require.NoError(t, os.Chmod(path, mode))
+	return path
+}
 
 func TestLoadEnvReadsAllVariables(t *testing.T) {
 	t.Setenv(EnvDatabaseURL, "postgres://localhost/soroforge")
@@ -58,6 +70,79 @@ func TestSigningSeedFromKeystoreFile(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "SABC", seed)
 	assert.Contains(t, source, "keystore:")
+}
+
+func TestSigningSeedAcceptsOwnerOnlyKeystoreModes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits do not apply on Windows")
+	}
+
+	for _, mode := range []os.FileMode{0o600, 0o400} {
+		t.Run(mode.String(), func(t *testing.T) {
+			path := writeKeystore(t, mode, "SABC\n")
+
+			seed, _, err := Env{KeystorePath: path}.SigningSeed()
+			require.NoError(t, err)
+			assert.Equal(t, "SABC", seed)
+		})
+	}
+}
+
+func TestSigningSeedRefusesReadableKeystore(t *testing.T) {
+	// A seed that signs mainnet deploys must not be readable by every account
+	// on a shared machine, exactly as SSH refuses private keys in this state.
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits do not apply on Windows")
+	}
+
+	for _, mode := range []os.FileMode{0o644, 0o640, 0o604, 0o666} {
+		t.Run(mode.String(), func(t *testing.T) {
+			const seed = "SSECRETSEEDMUSTNOTAPPEAR"
+			path := writeKeystore(t, mode, seed)
+
+			_, _, err := Env{KeystorePath: path}.SigningSeed()
+			require.Error(t, err)
+
+			// The message has to be actionable: which file, which mode, and
+			// the exact fix. A bare "permission denied" would leave an
+			// operator guessing.
+			assert.ErrorContains(t, err, path)
+			assert.ErrorContains(t, err, fmt.Sprintf("%04o", mode))
+			assert.ErrorContains(t, err, "chmod 600")
+			assert.ErrorContains(t, err, EnvAllowInsecureKeystore)
+
+			// Errors end up in CI logs; the file's contents must not.
+			assert.NotContains(t, err.Error(), seed)
+		})
+	}
+}
+
+func TestSigningSeedEscapeHatchAllowsReadableKeystore(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits do not apply on Windows")
+	}
+
+	// Some container secret mounts have modes the operator cannot change; the
+	// escape hatch makes accepting that risk an explicit, greppable act.
+	path := writeKeystore(t, 0o644, "SABC\n")
+
+	seed, _, err := Env{KeystorePath: path, AllowInsecureKeystore: true}.SigningSeed()
+	require.NoError(t, err)
+	assert.Equal(t, "SABC", seed)
+}
+
+func TestLoadEnvParsesInsecureKeystoreOptIn(t *testing.T) {
+	for _, value := range []string{"1", "true", "TRUE", "yes"} {
+		t.Setenv(EnvAllowInsecureKeystore, value)
+		assert.True(t, LoadEnv().AllowInsecureKeystore, "%q should opt in", value)
+	}
+
+	// Anything unrecognised leaves the permission check on: a typo must not
+	// silently waive a security control.
+	for _, value := range []string{"", "0", "false", "tru", "no"} {
+		t.Setenv(EnvAllowInsecureKeystore, value)
+		assert.False(t, LoadEnv().AllowInsecureKeystore, "%q must not opt in", value)
+	}
 }
 
 func TestSigningSeedPrefersEnvVarOverKeystore(t *testing.T) {
