@@ -266,9 +266,16 @@ test.
 |---|---|
 | `DATABASE_URL` | Postgres connection string. Required except for `deploy --dry-run`. |
 | `SOROFORGE_SECRET_KEY` | Deployer secret seed (`S...`). |
-| `SOROFORGE_KEYSTORE_PATH` | Path to a file containing only the seed. |
+| `SOROFORGE_KEYSTORE_PATH` | Path to a file containing only the seed. Must not be readable by group or others on Unix; see the security notes. |
+| `SOROFORGE_ALLOW_INSECURE_KEYSTORE` | Set to `1` to accept a keystore with loose permissions. Default: refuse. |
 | `SOROFORGE_API_TOKEN` | Bearer token for `serve`. Required to start it. |
+| `SOROFORGE_API_TOKENS` | Comma-separated bearer tokens for `serve`, for zero-downtime rotation. Wins over `SOROFORGE_API_TOKEN`. |
 | `SOROFORGE_API_ADDR` | Listen address (default `127.0.0.1:8080`). |
+| `SOROFORGE_TLS_CERT` | PEM certificate for `serve`; set together with `SOROFORGE_TLS_KEY`. |
+| `SOROFORGE_TLS_KEY` | PEM private key for `serve`. |
+| `SOROFORGE_API_RATE_LIMIT` | Per-client `/v1` requests per second (default `10`; `0` disables). |
+| `SOROFORGE_API_RATE_BURST` | Per-client `/v1` burst (default `20`). |
+| `SOROFORGE_API_TRUST_PROXY` | Set `true` to read the client IP from `X-Forwarded-For`. Default `false`. |
 | `SOROFORGE_CONFIG` | Config file path (default `./soroforge.yaml`). |
 | `TEST_DATABASE_URL` | Enables Postgres integration tests. |
 | `SOROFORGE_LIVE` | Enables the live testnet smoke tests. |
@@ -327,7 +334,19 @@ soroforge serve
 ```
 
 Every `/v1` endpoint requires `Authorization: Bearer $SOROFORGE_API_TOKEN`. The
-server **refuses to start without a token** — see the security notes.
+server **refuses to start without a token** — see the security notes. To rotate
+a token without downtime, set `SOROFORGE_API_TOKENS` to a comma-separated list
+(the list wins when both variables are set), move clients to the new token, then
+remove the old one; both work during the overlap.
+
+Requests to `/v1` are rate-limited per client IP: `10` requests per second with
+a burst of `20`, configurable with `SOROFORGE_API_RATE_LIMIT` and
+`SOROFORGE_API_RATE_BURST`. Exceeding the limit returns `429` with a
+`Retry-After` header and the usual `{"error": "..."}` body. `/health` is never
+rate-limited, so a caller over its budget can still probe liveness. Behind a
+reverse proxy, set `SOROFORGE_API_TRUST_PROXY=true` so the limiter takes the
+client from `X-Forwarded-For`; only do that when the proxy is the *only* way in,
+because the header is otherwise client-controlled and forgeable.
 
 | Method | Path | Description |
 |---|---|---|
@@ -350,6 +369,21 @@ Unknown JSON fields are rejected, so a misspelled `dry_run` fails loudly instead
 of deploying for real. Failures return `{"error": "..."}`; drift returns `200`
 with `"state":"drift"`, because the check ran and produced an answer.
 
+### TLS
+
+`serve` binds `127.0.0.1` by default because the process holds a signing key.
+To expose it on another interface without a proxy, pass `--tls-cert` and
+`--tls-key` (or set `SOROFORGE_TLS_CERT` and `SOROFORGE_TLS_KEY`); configuring
+one without the other is a startup error, and TLS 1.2 is the minimum accepted.
+Binding a non-loopback address without TLS logs a prominent warning. When TLS
+is not configured the HTTP path is exactly as it was before.
+
+```bash
+soroforge serve --addr 0.0.0.0:8443 \
+  --tls-cert /etc/soroforge/tls/cert.pem \
+  --tls-key /etc/soroforge/tls/key.pem
+```
+
 ---
 
 ## Security notes on key handling
@@ -370,6 +404,15 @@ include it in `--json` output or API responses, or echo it in an error message �
 a malformed seed is still a secret, and errors end up in CI logs.
 `Env.Redacted()` reports every secret as `(set)`/`(unset)`.
 
+**Keystore permissions:** on Unix, a keystore readable by group or others is
+refused before it is read, with an error naming the file, its mode, and the
+`chmod 600` fix. This mirrors SSH, which refuses private keys in that state for
+the same reason: a key that signs mainnet deploys must not be readable by every
+account on a shared machine. Windows has no POSIX permission bits, so the check
+is skipped there. Environments that mount secrets at a fixed mode the operator
+cannot change can set `SOROFORGE_ALLOW_INSECURE_KEYSTORE=1` to accept the risk
+deliberately — the permission error itself names that option.
+
 **Recommendations:**
 
 - Prefer a **keystore file** locally, at mode `0600`. Environment variables are
@@ -380,12 +423,16 @@ a malformed seed is still a secret, and errors end up in CI logs.
   laptop that also deploys to testnet.
 - Always `--dry-run` against mainnet first.
 
-**HTTP API:** the server refuses to start without `SOROFORGE_API_TOKEN`, and
-rejects tokens shorter than 16 characters. Tokens are compared in constant time,
-since a naive comparison leaks how much of the token matched through response
-timing. It binds `127.0.0.1` by default because this process holds a signing
-key; widen that only behind your own TLS and authentication. Generate a real
-token with `openssl rand -hex 32`.
+**HTTP API:** the server refuses to start without `SOROFORGE_API_TOKEN` (or the
+comma-separated `SOROFORGE_API_TOKENS`), and rejects tokens shorter than 16
+characters and duplicates. Tokens are compared in constant time, and every
+configured token is compared on every request, so response timing does not
+reveal which one matched or how long it is. `/v1` is rate-limited per client to
+10 requests/second with a burst of 20 by default, so a leaked token or a runaway
+CI loop cannot hammer deploys without bound; `/health` is exempt. The server
+binds `127.0.0.1` by default because this process holds a signing key; widen
+that with built-in TLS (`--tls-cert`/`--tls-key`) or behind your own TLS and
+authentication. Generate a real token with `openssl rand -hex 32`.
 
 **Not implemented, by design:** key generation, multisig or threshold signing,
 hardware wallets, and CI plugin integrations. The `stellar.Signer` interface is
