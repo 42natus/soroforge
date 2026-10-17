@@ -285,24 +285,6 @@ func TestLoadEnvReadsScopedAPITokens(t *testing.T) {
 	assert.Equal(t, "dashboard:read:token , ci:write:secret", LoadEnv().APITokens)
 }
 
-func TestAPITokenList(t *testing.T) {
-	t.Run("single token variable", func(t *testing.T) {
-		assert.Equal(t, []string{"only"}, Env{APIToken: "only"}.APITokenList())
-	})
-
-	t.Run("list wins over single variable", func(t *testing.T) {
-		// Documented in the README: an operator who writes the list means the
-		// list, so rotation cannot be defeated by a stale single variable.
-		env := Env{APIToken: "stale", APITokens: "new,old"}
-		assert.Equal(t, []string{"new", "old"}, env.APITokenList())
-	})
-
-	t.Run("nothing configured", func(t *testing.T) {
-		assert.Empty(t, Env{}.APITokenList())
-		assert.Empty(t, Env{APITokens: ""}.APITokenList())
-	})
-}
-
 func TestHasSigningKey(t *testing.T) {
 	assert.False(t, Env{}.HasSigningKey())
 	assert.True(t, Env{SecretKey: "S"}.HasSigningKey())

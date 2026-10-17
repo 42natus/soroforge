@@ -243,20 +243,6 @@ func (e Env) RateLimit() (RateLimitConfig, error) {
 	return cfg, nil
 }
 
-// APITokenList returns every configured API token, in the order they appear.
-//
-// EnvAPITokens wins when both variables are set: an operator who writes the
-// list means the list. EnvAPIToken remains the one-token shorthand.
-func (e Env) APITokenList() []string {
-	if e.APITokens != "" {
-		return splitTokens(e.APITokens)
-	}
-	if e.APIToken != "" {
-		return []string{e.APIToken}
-	}
-	return nil
-}
-
 // SigningSeed returns the deployer's secret seed from whichever source is
 // configured, along with a label describing that source for diagnostics.
 //
@@ -365,18 +351,6 @@ func orDefault(v, fallback string) string {
 		return fallback
 	}
 	return v
-}
-
-// splitTokens parses a comma-separated token list, trimming surrounding space
-// and dropping empty entries so a trailing comma is not a startup failure.
-func splitTokens(v string) []string {
-	var tokens []string
-	for _, part := range strings.Split(v, ",") {
-		if part = strings.TrimSpace(part); part != "" {
-			tokens = append(tokens, part)
-		}
-	}
-	return tokens
 }
 
 // envBool reports whether an environment variable is set to a truthy value.
