@@ -126,6 +126,25 @@ func (m *MemoryStore) ListContracts(ctx context.Context, network string) ([]Cont
 	return out, nil
 }
 
+// ListContractsPage implements Store.
+func (m *MemoryStore) ListContractsPage(ctx context.Context, network string, limit, offset int) ([]Contract, error) {
+	if err := validatePage(limit, offset); err != nil {
+		return nil, err
+	}
+	contracts, err := m.ListContracts(ctx, network)
+	if err != nil {
+		return nil, err
+	}
+	if offset >= len(contracts) {
+		return []Contract{}, nil
+	}
+	end := len(contracts)
+	if limit < len(contracts)-offset {
+		end = offset + limit
+	}
+	return contracts[offset:end], nil
+}
+
 // RecordDeployment implements Store.
 func (m *MemoryStore) RecordDeployment(ctx context.Context, d Deployment) (Deployment, error) {
 	if err := ctx.Err(); err != nil {
@@ -141,6 +160,12 @@ func (m *MemoryStore) RecordDeployment(ctx context.Context, d Deployment) (Deplo
 	d.ID = m.nextID
 	m.nextID++
 	d.CreatedAt = m.now()
+
+	if d.FeeCharged != nil {
+		fee := *d.FeeCharged
+		d.FeeCharged = &fee
+	}
+
 	m.deployments = append(m.deployments, d)
 	return d, nil
 }
@@ -169,6 +194,25 @@ func (m *MemoryStore) History(ctx context.Context, network, alias string) ([]Dep
 		return out[i].ID > out[j].ID
 	})
 	return out, nil
+}
+
+// HistoryPage implements Store.
+func (m *MemoryStore) HistoryPage(ctx context.Context, network, alias string, limit, offset int) ([]Deployment, error) {
+	if err := validatePage(limit, offset); err != nil {
+		return nil, err
+	}
+	history, err := m.History(ctx, network, alias)
+	if err != nil {
+		return nil, err
+	}
+	if offset >= len(history) {
+		return []Deployment{}, nil
+	}
+	end := len(history)
+	if limit < len(history)-offset {
+		end = offset + limit
+	}
+	return history[offset:end], nil
 }
 
 // Close implements Store. There is nothing to release.

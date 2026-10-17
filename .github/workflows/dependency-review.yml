@@ -13,6 +13,9 @@ permissions:
 jobs:
   dependency-review:
     name: Review dependency changes
+    # Enable this repository variable after Dependency graph is enabled in
+    # repository settings; the action cannot run without the graph.
+    if: vars.DEPENDENCY_GRAPH_ENABLED == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read

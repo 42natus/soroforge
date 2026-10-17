@@ -14,6 +14,7 @@ package api
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,8 +40,8 @@ type Service interface {
 	Upgrade(ctx context.Context, req deploy.UpgradeRequest) (*deploy.UpgradeResult, error)
 	Status(ctx context.Context, req deploy.StatusRequest) (*deploy.StatusResult, error)
 	StatusAll(ctx context.Context, network string) (*deploy.NetworkStatus, error)
-	List(ctx context.Context, network string) ([]store.Contract, error)
-	History(ctx context.Context, network, alias string) ([]store.Deployment, error)
+	ListPage(ctx context.Context, network string, limit, offset int) ([]store.Contract, error)
+	HistoryPage(ctx context.Context, network, alias string, limit, offset int) ([]store.Deployment, error)
 }
 
 // Readiness reports whether SoroForge's dependencies are usable. It backs
@@ -52,6 +53,9 @@ type Service interface {
 type Readiness interface {
 	Check(ctx context.Context) readiness.Status
 }
+
+//go:embed openapi.json
+var openAPIDocument []byte
 
 // requestTimeout bounds a single API request.
 //
@@ -109,6 +113,7 @@ func (h *handlers) routes() []route {
 	return []route{
 		{http.MethodGet, "/health", ScopePublic, h.health},
 		{http.MethodGet, "/ready", ScopePublic, h.ready},
+		{http.MethodGet, "/openapi.json", ScopePublic, h.openapi},
 
 		{http.MethodPost, "/v1/deploy", ScopeWrite, h.deploy},
 		{http.MethodPost, "/v1/upgrade", ScopeWrite, h.upgrade},

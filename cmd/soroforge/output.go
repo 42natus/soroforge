@@ -222,14 +222,29 @@ func printHistory(alias, network string, deployments []store.Deployment) error {
 	fmt.Fprintf(out(), "History for %s on %s (newest first):\n\n", alias, network)
 
 	tw := tabwriter.NewWriter(out(), 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "WHEN\tACTION\tWASM HASH\tDEPLOYER\tLEDGER\tTX\tNOTES")
+	fmt.Fprintln(tw, "WHEN\tACTION\tWASM HASH\tDEPLOYER\tLEDGER\tFEE (STROOPS)\tFEE (XLM)\tCOMMIT\tTX\tNOTES")
 	for _, d := range deployments {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		feeStroops, feeXLM := "-", "-"
+		if d.FeeCharged != nil {
+			feeStroops = fmt.Sprintf("%d", *d.FeeCharged)
+			feeXLM = fmt.Sprintf("%d.%07d", *d.FeeCharged/10_000_000, *d.FeeCharged%10_000_000)
+		}
+		commit := "-"
+		if d.GitCommit != "" {
+			commit = shortHash(d.GitCommit)
+			if d.Dirty {
+				commit += "*"
+			}
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			formatTime(d.CreatedAt),
 			d.Action,
 			shortHash(d.WasmHash),
 			shortHash(d.DeployerPubkey),
 			formatLedger(d.Ledger),
+			feeStroops,
+			feeXLM,
+			commit,
 			shortHash(d.TxHash),
 			truncate(d.Notes, 40),
 		)

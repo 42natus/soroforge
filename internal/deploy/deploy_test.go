@@ -181,6 +181,8 @@ func otherContractID(t *testing.T, seed byte) string {
 func TestDeployRecordsContractAndHistory(t *testing.T) {
 	h := newHarness(t, harnessOptions{})
 	ctx := context.Background()
+	confirmedFee := int64(54321)
+	h.client.AwaitResponse.FeeCharged = &confirmedFee
 
 	result, err := h.svc.Deploy(ctx, deploy.DeployRequest{
 		Alias: "counter",
@@ -210,6 +212,9 @@ func TestDeployRecordsContractAndHistory(t *testing.T) {
 	assert.Equal(t, h.signer.Address(), history[0].DeployerPubkey)
 	assert.Equal(t, "first release", history[0].Notes)
 	assert.NotEmpty(t, history[0].TxHash)
+	require.NotNil(t, history[0].FeeCharged)
+	assert.Equal(t, confirmedFee, *history[0].FeeCharged,
+		"history records the confirmed fee, not the simulation estimate")
 }
 
 func TestDeployDryRunSubmitsNothingAndRecordsNothing(t *testing.T) {

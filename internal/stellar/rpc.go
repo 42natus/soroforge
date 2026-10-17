@@ -9,6 +9,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/clients/rpcclient"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/txnbuild"
+	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
 // This file is the only place SoroForge touches the Stellar RPC SDK. Everything
@@ -156,13 +157,27 @@ func (c *RPCClient) AwaitTransaction(ctx context.Context, hash string) (TxResult
 	if err != nil {
 		return TxResult{}, fmt.Errorf("getTransaction %s: %w", hash, err)
 	}
+	feeCharged := feeChargedFromResultXDR(resp.ResultXDR)
 	return TxResult{
 		Status:        resp.Status,
 		Hash:          resp.TransactionHash,
 		Ledger:        resp.Ledger,
 		ResultMetaXDR: resp.ResultMetaXDR,
 		ResultXDR:     resp.ResultXDR,
+		FeeCharged:    feeCharged,
 	}, nil
+}
+
+func feeChargedFromResultXDR(resultXDR string) *int64 {
+	if resultXDR == "" {
+		return nil
+	}
+	var result xdr.TransactionResult
+	if err := xdr.SafeUnmarshalBase64(resultXDR, &result); err != nil {
+		return nil
+	}
+	fee := int64(result.FeeCharged)
+	return &fee
 }
 
 // LedgerEntries implements Client.

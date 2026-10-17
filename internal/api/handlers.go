@@ -1,7 +1,9 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/soroworks/soroforge/internal/deploy"
@@ -89,42 +91,119 @@ func (h *handlers) upgrade(w http.ResponseWriter, r *http.Request) {
 // listContractsResponse wraps the list so the payload can gain fields later
 // without becoming a breaking change for clients parsing a bare array.
 type listContractsResponse struct {
-	Contracts []store.Contract `json:"contracts"`
+	Contracts  []store.Contract `json:"contracts"`
+	Limit      int              `json:"limit"`
+	Offset     int              `json:"offset"`
+	HasMore    bool             `json:"has_more"`
+	NextOffset *int             `json:"next_offset,omitempty"`
+}
+
+const (
+	defaultPageSize = 100
+	maxPageSize     = 500
+)
+
+type pageParams struct {
+	limit  int
+	offset int
+}
+
+func parsePageParams(r *http.Request) (pageParams, error) {
+	params := pageParams{limit: defaultPageSize}
+	query := r.URL.Query()
+	if values, ok := query["limit"]; ok {
+		if len(values) != 1 {
+			return pageParams{}, fmt.Errorf("limit must be specified once")
+		}
+		limit, err := strconv.Atoi(values[0])
+		if err != nil || limit < 1 || limit > maxPageSize {
+			return pageParams{}, fmt.Errorf("limit must be between 1 and %d", maxPageSize)
+		}
+		params.limit = limit
+	}
+	if values, ok := query["offset"]; ok {
+		if len(values) != 1 {
+			return pageParams{}, fmt.Errorf("offset must be specified once")
+		}
+		offset, err := strconv.Atoi(values[0])
+		if err != nil || offset < 0 {
+			return pageParams{}, fmt.Errorf("offset must be a non-negative integer")
+		}
+		params.offset = offset
+	}
+	return params, nil
+}
+
+func nextPage[T any](items []T, params pageParams) ([]T, bool, *int) {
+	if len(items) <= params.limit {
+		return items, false, nil
+	}
+	nextOffset := params.offset + params.limit
+	return items[:params.limit], true, &nextOffset
 }
 
 // listContracts handles GET /v1/contracts?network=.
 func (h *handlers) listContracts(w http.ResponseWriter, r *http.Request) {
 	network := r.URL.Query().Get("network")
+	params, err := parsePageParams(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
-	contracts, err := h.svc.List(r.Context(), network)
+	contracts, err := h.svc.ListPage(r.Context(), network, params.limit+1, params.offset)
 	if err != nil {
 		writeError(w, statusForError(err), err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, listContractsResponse{Contracts: contracts})
+	contracts, hasMore, nextOffset := nextPage(contracts, params)
+	writeJSON(w, http.StatusOK, listContractsResponse{
+		Contracts: contracts, Limit: params.limit, Offset: params.offset,
+		HasMore: hasMore, NextOffset: nextOffset,
+	})
 }
 
 type historyResponse struct {
 	Alias       string             `json:"alias"`
 	Network     string             `json:"network"`
 	Deployments []store.Deployment `json:"deployments"`
+	Limit       int                `json:"limit"`
+	Offset      int                `json:"offset"`
+	HasMore     bool               `json:"has_more"`
+	NextOffset  *int               `json:"next_offset,omitempty"`
 }
 
 // history handles GET /v1/contracts/{network}/{alias}/history.
 func (h *handlers) history(w http.ResponseWriter, r *http.Request) {
 	network := chi.URLParam(r, "network")
 	alias := chi.URLParam(r, "alias")
+	params, err := parsePageParams(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
-	deployments, err := h.svc.History(r.Context(), network, alias)
+	deployments, err := h.svc.HistoryPage(r.Context(), network, alias, params.limit+1, params.offset)
 	if err != nil {
 		writeError(w, statusForError(err), err.Error())
 		return
 	}
+	deployments, hasMore, nextOffset := nextPage(deployments, params)
 	writeJSON(w, http.StatusOK, historyResponse{
 		Alias:       alias,
 		Network:     network,
 		Deployments: deployments,
+		Limit:       params.limit,
+		Offset:      params.offset,
+		HasMore:     hasMore,
+		NextOffset:  nextOffset,
 	})
+}
+
+func (h *handlers) openapi(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(openAPIDocument)
 }
 
 // status handles GET /v1/contracts/{network}/{alias}/status.

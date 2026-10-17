@@ -1,0 +1,258 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "SoroForge API",
+    "version": "1.0.0",
+    "description": "HTTP API for SoroForge contract deployment and management."
+  },
+  "servers": [{ "url": "/" }],
+  "security": [{ "bearerAuth": [] }],
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "health",
+        "summary": "Check process health",
+        "security": [],
+        "responses": {
+          "200": { "description": "Process is healthy", "content": { "application/json": { "schema": { "type": "object", "required": ["status"], "properties": { "status": { "const": "ok" } } } } } }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "operationId": "getOpenApiDocument",
+        "summary": "Get this API document",
+        "security": [],
+        "responses": {
+          "200": { "description": "OpenAPI 3.1 document", "content": { "application/json": { "schema": { "type": "object" } } } }
+        }
+      }
+    },
+    "/ready": {
+      "get": {
+        "operationId": "readiness",
+        "summary": "Check dependency readiness",
+        "security": [],
+        "responses": {
+          "200": { "description": "Dependencies are ready", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReadinessStatus" } } } },
+          "503": { "description": "One or more dependencies are unavailable", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReadinessStatus" } } } }
+        }
+      }
+    },
+    "/v1/deploy": {
+      "post": {
+        "operationId": "deploy",
+        "summary": "Deploy a contract",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeployRequest" } } } },
+        "responses": {
+          "201": { "description": "Deployment submitted and recorded", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeployResult" } } } },
+          "200": { "description": "Dry run completed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeployResult" } } } },
+          "400": { "$ref": "#/components/responses/ClientError" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "description": "Bearer token lacks write scope", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      }
+    },
+    "/v1/upgrade": {
+      "post": {
+        "operationId": "upgrade",
+        "summary": "Upgrade a tracked contract",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UpgradeRequest" } } } },
+        "responses": {
+          "200": { "description": "Upgrade completed or simulated", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UpgradeResult" } } } },
+          "400": { "$ref": "#/components/responses/ClientError" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "description": "Bearer token lacks write scope", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      }
+    },
+    "/v1/contracts": {
+      "get": {
+        "operationId": "listContracts",
+        "summary": "List tracked contracts",
+        "parameters": [
+          { "$ref": "#/components/parameters/Network" },
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/Offset" }
+        ],
+        "responses": {
+          "200": { "description": "One page of contracts", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ContractPage" } } } },
+          "400": { "$ref": "#/components/responses/ClientError" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      }
+    },
+    "/v1/contracts/{network}/{alias}/history": {
+      "get": {
+        "operationId": "contractHistory",
+        "summary": "Get deployment history for a contract",
+        "parameters": [
+          { "$ref": "#/components/parameters/PathNetwork" },
+          { "$ref": "#/components/parameters/PathAlias" },
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/Offset" }
+        ],
+        "responses": {
+          "200": { "description": "One newest-first page of deployment history", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HistoryPage" } } } },
+          "400": { "$ref": "#/components/responses/ClientError" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      }
+    },
+    "/v1/contracts/{network}/{alias}/status": {
+      "get": {
+        "operationId": "contractStatus",
+        "summary": "Check one contract against the ledger",
+        "parameters": [
+          { "$ref": "#/components/parameters/PathNetwork" },
+          { "$ref": "#/components/parameters/PathAlias" }
+        ],
+        "responses": {
+          "200": { "description": "Contract status", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StatusResult" } } } },
+          "400": { "$ref": "#/components/responses/ClientError" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      }
+    },
+    "/v1/contracts/{network}/status": {
+      "get": {
+        "operationId": "networkStatus",
+        "summary": "Check all tracked contracts on a network",
+        "parameters": [{ "$ref": "#/components/parameters/PathNetwork" }],
+        "responses": {
+          "200": { "description": "Network contract status", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NetworkStatus" } } } },
+          "400": { "$ref": "#/components/responses/ClientError" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": { "type": "http", "scheme": "bearer", "bearerFormat": "SOROFORGE_API_TOKEN" }
+    },
+    "parameters": {
+      "Network": { "name": "network", "in": "query", "required": false, "schema": { "type": "string" } },
+      "PathNetwork": { "name": "network", "in": "path", "required": true, "schema": { "type": "string" } },
+      "PathAlias": { "name": "alias", "in": "path", "required": true, "schema": { "type": "string" } },
+      "Limit": { "name": "limit", "in": "query", "description": "Page size, default 100, maximum 500.", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 500, "default": 100 } },
+      "Offset": { "name": "offset", "in": "query", "description": "Zero-based row offset.", "required": false, "schema": { "type": "integer", "minimum": 0, "default": 0 } }
+    },
+    "responses": {
+      "ClientError": { "description": "Invalid request", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Unauthorized": { "description": "Bearer token required", "headers": { "WWW-Authenticate": { "schema": { "type": "string" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "NotFound": { "description": "Resource not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "ServerError": { "description": "Operation failed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+    },
+    "schemas": {
+      "Error": { "type": "object", "required": ["error"], "properties": { "error": { "type": "string" } } },
+      "DeployRequest": {
+        "type": "object", "required": ["alias"], "additionalProperties": false,
+        "properties": {
+          "alias": { "type": "string" },
+          "network": { "type": "string" },
+          "notes": { "type": "string" },
+          "dry_run": { "type": "boolean", "default": false },
+          "git_commit": { "type": "string", "description": "Optional source commit override, useful in detached CI checkouts." }
+        }
+      },
+      "UpgradeRequest": {
+        "type": "object", "required": ["alias"], "additionalProperties": false,
+        "properties": {
+          "alias": { "type": "string" },
+          "network": { "type": "string" },
+          "notes": { "type": "string" },
+          "dry_run": { "type": "boolean", "default": false },
+          "git_commit": { "type": "string", "description": "Optional source commit override, useful in detached CI checkouts." }
+        }
+      },
+      "Contract": {
+        "type": "object", "required": ["alias", "network", "contract_id", "current_wasm_hash", "created_at", "updated_at"],
+        "properties": {
+          "alias": { "type": "string" }, "network": { "type": "string" },
+          "contract_id": { "type": "string" }, "current_wasm_hash": { "type": "string" },
+          "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "Deployment": {
+        "type": "object", "required": ["id", "alias", "network", "contract_id", "wasm_hash", "action", "deployer_pubkey", "git_commit", "dirty", "created_at"],
+        "properties": {
+          "id": { "type": "integer", "format": "int64" }, "alias": { "type": "string" },
+          "network": { "type": "string" }, "contract_id": { "type": "string" }, "wasm_hash": { "type": "string" },
+          "action": { "type": "string", "enum": ["deploy", "upgrade", "upload"] }, "deployer_pubkey": { "type": "string" },
+          "tx_hash": { "type": "string" }, "ledger": { "type": "integer", "format": "int64" },
+          "git_commit": { "type": "string" }, "dirty": { "type": "boolean" },
+          "fee_charged": { "type": ["integer", "null"], "format": "int64", "description": "Confirmed transaction fee in stroops." },
+          "notes": { "type": "string" }, "created_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "Page": {
+        "type": "object", "required": ["limit", "offset", "has_more"],
+        "properties": {
+          "limit": { "type": "integer" }, "offset": { "type": "integer" },
+          "has_more": { "type": "boolean" }, "next_offset": { "type": "integer" }
+        }
+      },
+      "ContractPage": {
+        "allOf": [
+          { "$ref": "#/components/schemas/Page" },
+          { "type": "object", "required": ["contracts"], "properties": { "contracts": { "type": "array", "items": { "$ref": "#/components/schemas/Contract" } } } }
+        ]
+      },
+      "HistoryPage": {
+        "allOf": [
+          { "$ref": "#/components/schemas/Page" },
+          { "type": "object", "required": ["alias", "network", "deployments"], "properties": {
+            "alias": { "type": "string" }, "network": { "type": "string" },
+            "deployments": { "type": "array", "items": { "$ref": "#/components/schemas/Deployment" } }
+          } }
+        ]
+      },
+      "DeployResult": { "type": "object", "properties": {
+        "alias": { "type": "string" }, "network": { "type": "string" }, "contract_id": { "type": "string" },
+        "wasm_hash": { "type": "string" }, "deployer_pubkey": { "type": "string" }, "upload_tx_hash": { "type": "string" },
+        "create_tx_hash": { "type": "string" }, "ledger": { "type": "integer" }, "dry_run": { "type": "boolean" },
+        "upload_envelope_xdr": { "type": "string" }, "create_envelope_xdr": { "type": "string" },
+        "upload_skipped": { "type": "boolean" }, "deployment": { "$ref": "#/components/schemas/Deployment" },
+        "catalog": { "$ref": "#/components/schemas/CatalogStatus" }
+      } },
+      "UpgradeResult": { "type": "object", "properties": {
+        "alias": { "type": "string" }, "network": { "type": "string" }, "contract_id": { "type": "string" },
+        "previous_wasm_hash": { "type": "string" }, "wasm_hash": { "type": "string" }, "deployer_pubkey": { "type": "string" },
+        "upgrade_fn": { "type": "string" }, "upload_tx_hash": { "type": "string" }, "upgrade_tx_hash": { "type": "string" },
+        "ledger": { "type": "integer" }, "dry_run": { "type": "boolean" }, "upload_envelope_xdr": { "type": "string" },
+        "upgrade_envelope_xdr": { "type": "string" }, "upload_skipped": { "type": "boolean" }, "no_change": { "type": "boolean" },
+        "deployment": { "$ref": "#/components/schemas/Deployment" }, "catalog": { "$ref": "#/components/schemas/CatalogStatus" }
+      } },
+      "CatalogStatus": { "type": "object", "required": ["registry", "ok"], "properties": {
+        "registry": { "type": "string" }, "ok": { "type": "boolean" }, "error": { "type": "string" },
+        "entry": { "type": "object", "required": ["url", "created", "changed", "functions"], "properties": {
+          "url": { "type": "string", "format": "uri" }, "created": { "type": "boolean" },
+          "changed": { "type": "boolean" }, "functions": { "type": "integer" }
+        } }
+      } },
+      "StatusResult": { "type": "object", "required": ["alias", "network", "state", "detail"], "properties": {
+        "alias": { "type": "string" }, "network": { "type": "string" }, "contract_id": { "type": "string" },
+        "state": { "type": "string", "enum": ["in_sync", "drift", "untracked", "missing"] },
+        "expected_wasm_hash": { "type": "string" }, "actual_wasm_hash": { "type": "string" }, "detail": { "type": "string" }
+      } },
+      "NetworkStatus": { "type": "object", "required": ["network", "in_sync", "contracts"], "properties": {
+        "network": { "type": "string" }, "in_sync": { "type": "boolean" },
+        "contracts": { "type": "array", "items": { "$ref": "#/components/schemas/StatusResult" } }
+      } },
+      "ReadinessStatus": { "type": "object", "required": ["ready", "dependencies"], "properties": {
+        "ready": { "type": "boolean" }, "dependencies": { "type": "array", "items": { "type": "object", "required": ["name", "ok"], "properties": {
+          "name": { "type": "string" }, "ok": { "type": "boolean" }, "error": { "type": "string" }
+        } } }
+      } }
+    }
+  }
+}

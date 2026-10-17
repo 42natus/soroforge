@@ -108,6 +108,9 @@ FROM contracts
 WHERE ($1 = '' OR network = $1)
 ORDER BY network, alias`
 
+const listContractsPageSQL = listContractsSQL + `
+LIMIT $2 OFFSET $3`
+
 // ListContracts implements Store.
 func (p *Postgres) ListContracts(ctx context.Context, network string) ([]Contract, error) {
 	rows, err := p.pool.Query(ctx, listContractsSQL, network)
@@ -130,13 +133,38 @@ func (p *Postgres) ListContracts(ctx context.Context, network string) ([]Contrac
 	return contracts, nil
 }
 
+// ListContractsPage implements Store.
+func (p *Postgres) ListContractsPage(ctx context.Context, network string, limit, offset int) ([]Contract, error) {
+	if err := validatePage(limit, offset); err != nil {
+		return nil, err
+	}
+	rows, err := p.pool.Query(ctx, listContractsPageSQL, network, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("list contracts page: %w", err)
+	}
+	defer rows.Close()
+
+	contracts := []Contract{}
+	for rows.Next() {
+		c, err := scanContract(rows)
+		if err != nil {
+			return nil, fmt.Errorf("list contracts page: %w", err)
+		}
+		contracts = append(contracts, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list contracts page: %w", err)
+	}
+	return contracts, nil
+}
+
 const recordDeploymentSQL = `
 INSERT INTO deployments (
-    alias, network, contract_id, wasm_hash, action, deployer_pubkey, tx_hash, ledger, notes
+    alias, network, contract_id, wasm_hash, action, deployer_pubkey, tx_hash, ledger, git_commit, dirty, fee_charged, notes
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 RETURNING id, alias, network, contract_id, wasm_hash, action,
-          deployer_pubkey, tx_hash, ledger, notes, created_at`
+		deployer_pubkey, tx_hash, ledger, git_commit, dirty, fee_charged, notes, created_at`
 
 // RecordDeployment implements Store.
 func (p *Postgres) RecordDeployment(ctx context.Context, d Deployment) (Deployment, error) {
@@ -161,9 +189,22 @@ func (p *Postgres) RecordDeployment(ctx context.Context, d Deployment) (Deployme
 		notes = &d.Notes
 	}
 
+	var feeCharged *int64
+	if d.FeeCharged != nil {
+		feeCharged = d.FeeCharged
+	}
+	var gitCommit *string
+	if d.GitCommit != "" {
+		gitCommit = &d.GitCommit
+	}
+	var dirty *bool
+	if d.GitCommit != "" {
+		dirty = &d.Dirty
+	}
+
 	row := p.pool.QueryRow(ctx, recordDeploymentSQL,
 		d.Alias, d.Network, d.ContractID, d.WasmHash, string(d.Action),
-		d.DeployerPubkey, txHash, ledger, notes)
+		d.DeployerPubkey, txHash, ledger, gitCommit, dirty, feeCharged, notes)
 
 	out, err := scanDeployment(row)
 	if err != nil {
@@ -174,10 +215,13 @@ func (p *Postgres) RecordDeployment(ctx context.Context, d Deployment) (Deployme
 
 const historySQL = `
 SELECT id, alias, network, contract_id, wasm_hash, action,
-       deployer_pubkey, tx_hash, ledger, notes, created_at
+	deployer_pubkey, tx_hash, ledger, git_commit, dirty, fee_charged, notes, created_at
 FROM deployments
 WHERE network = $1 AND alias = $2
 ORDER BY created_at DESC, id DESC`
+
+const historyPageSQL = historySQL + `
+LIMIT $3 OFFSET $4`
 
 // History implements Store.
 //
@@ -205,6 +249,31 @@ func (p *Postgres) History(ctx context.Context, network, alias string) ([]Deploy
 	return deployments, nil
 }
 
+// HistoryPage implements Store.
+func (p *Postgres) HistoryPage(ctx context.Context, network, alias string, limit, offset int) ([]Deployment, error) {
+	if err := validatePage(limit, offset); err != nil {
+		return nil, err
+	}
+	rows, err := p.pool.Query(ctx, historyPageSQL, network, alias, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("history page for %s/%s: %w", network, alias, err)
+	}
+	defer rows.Close()
+
+	deployments := []Deployment{}
+	for rows.Next() {
+		d, err := scanDeployment(rows)
+		if err != nil {
+			return nil, fmt.Errorf("history page for %s/%s: %w", network, alias, err)
+		}
+		deployments = append(deployments, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("history page for %s/%s: %w", network, alias, err)
+	}
+	return deployments, nil
+}
+
 // scanner is satisfied by both pgx.Row and pgx.Rows, so the column lists below
 // are written once rather than duplicated for single-row and multi-row reads.
 type scanner interface {
@@ -219,14 +288,17 @@ func scanContract(s scanner) (Contract, error) {
 
 func scanDeployment(s scanner) (Deployment, error) {
 	var (
-		d      Deployment
-		action string
-		txHash *string
-		ledger *int64
-		notes  *string
+		d           Deployment
+		action      string
+		txHash      *string
+		ledger      *int64
+		txGitCommit *string
+		txDirty     *bool
+		txFee       *int64
+		notes       *string
 	)
 	err := s.Scan(&d.ID, &d.Alias, &d.Network, &d.ContractID, &d.WasmHash, &action,
-		&d.DeployerPubkey, &txHash, &ledger, &notes, &d.CreatedAt)
+		&d.DeployerPubkey, &txHash, &ledger, &txGitCommit, &txDirty, &txFee, &notes, &d.CreatedAt)
 	if err != nil {
 		return Deployment{}, err
 	}
@@ -237,6 +309,15 @@ func scanDeployment(s scanner) (Deployment, error) {
 	}
 	if ledger != nil {
 		d.Ledger = uint32(*ledger)
+	}
+	if txGitCommit != nil {
+		d.GitCommit = *txGitCommit
+	}
+	if txDirty != nil {
+		d.Dirty = *txDirty
+	}
+	if txFee != nil {
+		d.FeeCharged = txFee
 	}
 	if notes != nil {
 		d.Notes = *notes

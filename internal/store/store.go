@@ -82,6 +82,18 @@ type Deployment struct {
 	TxHash string `json:"tx_hash,omitempty"`
 	Ledger uint32 `json:"ledger,omitempty"`
 
+	// GitCommit is the git commit hash the deploy/upgrade was recorded from.
+	// Empty string when run outside a git repository or when detection fails.
+	GitCommit string `json:"git_commit"`
+
+	// Dirty reports whether the working tree had uncommitted changes at the time
+	// of the deploy/upgrade. Set to true when inside a git repo with modifications.
+	Dirty bool `json:"dirty"`
+
+	// FeeCharged is the fee paid for the transaction, in stroops.
+	// Nullable: absent for a dry run, or if the fee cannot be determined.
+	FeeCharged *int64 `json:"fee_charged,omitempty"`
+
 	// Notes is free-form operator context, e.g. a ticket or release tag.
 	Notes string `json:"notes,omitempty"`
 
@@ -106,14 +118,30 @@ type Store interface {
 	// contracts across all networks.
 	ListContracts(ctx context.Context, network string) ([]Contract, error)
 
+	// ListContractsPage returns one page using the same network/alias ordering.
+	ListContractsPage(ctx context.Context, network string, limit, offset int) ([]Contract, error)
+
 	// RecordDeployment appends a history entry.
 	RecordDeployment(ctx context.Context, d Deployment) (Deployment, error)
 
 	// History returns a contract's deployments, newest first.
 	History(ctx context.Context, network, alias string) ([]Deployment, error)
 
+	// HistoryPage returns one newest-first page of a contract's deployment log.
+	HistoryPage(ctx context.Context, network, alias string, limit, offset int) ([]Deployment, error)
+
 	// Close releases resources held by the store.
 	Close() error
+}
+
+func validatePage(limit, offset int) error {
+	if limit < 1 {
+		return fmt.Errorf("page limit must be positive")
+	}
+	if offset < 0 {
+		return fmt.Errorf("page offset must be non-negative")
+	}
+	return nil
 }
 
 // Validate checks a deployment record before it is written, so that bad data is

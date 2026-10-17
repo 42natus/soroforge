@@ -198,6 +198,18 @@ func (s *Service) List(ctx context.Context, network string) ([]store.Contract, e
 	return s.store.ListContracts(ctx, network)
 }
 
+// ListPage returns one page of tracked contracts without changing CLI behavior.
+func (s *Service) ListPage(ctx context.Context, network string, limit, offset int) ([]store.Contract, error) {
+	if network != "" {
+		name, _, err := s.cfg.Network(network)
+		if err != nil {
+			return nil, err
+		}
+		network = name
+	}
+	return s.store.ListContractsPage(ctx, network, limit, offset)
+}
+
 // History returns a contract's deploy and upgrade log, newest first.
 func (s *Service) History(ctx context.Context, network, alias string) ([]store.Deployment, error) {
 	name, _, err := s.cfg.Network(network)
@@ -205,4 +217,13 @@ func (s *Service) History(ctx context.Context, network, alias string) ([]store.D
 		return nil, err
 	}
 	return s.store.History(ctx, name, alias)
+}
+
+// HistoryPage returns one newest-first page of a contract's deployment log.
+func (s *Service) HistoryPage(ctx context.Context, network, alias string, limit, offset int) ([]store.Deployment, error) {
+	name, _, err := s.cfg.Network(network)
+	if err != nil {
+		return nil, err
+	}
+	return s.store.HistoryPage(ctx, name, alias, limit, offset)
 }

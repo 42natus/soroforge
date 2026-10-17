@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/soroworks/soroforge/internal/api"
 	"github.com/soroworks/soroforge/internal/deploy"
 	"github.com/soroworks/soroforge/internal/readiness"
@@ -43,6 +44,8 @@ type fakeService struct {
 	lastStatus  deploy.StatusRequest
 	lastNetwork string
 	lastAlias   string
+	lastLimit   int
+	lastOffset  int
 
 	// calls counts mutating operations, so tests can prove that a rejected
 	// request never reached the service.
@@ -91,6 +94,23 @@ func (f *fakeService) List(_ context.Context, network string) ([]store.Contract,
 	return f.contracts, nil
 }
 
+func (f *fakeService) ListPage(_ context.Context, network string, limit, offset int) ([]store.Contract, error) {
+	f.lastNetwork = network
+	f.lastLimit = limit
+	f.lastOffset = offset
+	if f.err != nil {
+		return nil, f.err
+	}
+	if offset >= len(f.contracts) {
+		return []store.Contract{}, nil
+	}
+	end := offset + limit
+	if end > len(f.contracts) {
+		end = len(f.contracts)
+	}
+	return f.contracts[offset:end], nil
+}
+
 func (f *fakeService) History(_ context.Context, network, alias string) ([]store.Deployment, error) {
 	f.lastNetwork = network
 	f.lastAlias = alias
@@ -98,6 +118,24 @@ func (f *fakeService) History(_ context.Context, network, alias string) ([]store
 		return nil, f.err
 	}
 	return f.deployments, nil
+}
+
+func (f *fakeService) HistoryPage(_ context.Context, network, alias string, limit, offset int) ([]store.Deployment, error) {
+	f.lastNetwork = network
+	f.lastAlias = alias
+	f.lastLimit = limit
+	f.lastOffset = offset
+	if f.err != nil {
+		return nil, f.err
+	}
+	if offset >= len(f.deployments) {
+		return []store.Deployment{}, nil
+	}
+	end := offset + limit
+	if end > len(f.deployments) {
+		end = len(f.deployments)
+	}
+	return f.deployments[offset:end], nil
 }
 
 // testTokens matches what the server builds from SOROFORGE_API_TOKEN plus a
@@ -240,6 +278,55 @@ func TestHealthNeedsNoToken(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "ok")
 }
 
+func TestOpenAPIDocumentIsServedWithoutAuthentication(t *testing.T) {
+	router := newTestRouter(t, &fakeService{})
+	empty := ""
+	rec := do(t, router, http.MethodGet, "/openapi.json", nil, &empty)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+	var document map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &document))
+	assert.Equal(t, "3.1.0", document["openapi"])
+}
+
+func TestOpenAPIDocumentMatchesRouter(t *testing.T) {
+	router := newTestRouter(t, &fakeService{})
+	empty := ""
+	response := do(t, router, http.MethodGet, "/openapi.json", nil, &empty)
+	require.Equal(t, http.StatusOK, response.Code)
+	var document struct {
+		Paths map[string]map[string]json.RawMessage `json:"paths"`
+	}
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &document))
+
+	documented := map[string]map[string]bool{}
+	for path, operations := range document.Paths {
+		documented[path] = map[string]bool{}
+		for method := range operations {
+			documented[path][method] = true
+		}
+	}
+
+	routes := router.(chi.Routes)
+	seen := map[string]map[string]bool{}
+	err := chi.Walk(routes, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		method = strings.ToLower(method)
+		if seen[route] == nil {
+			seen[route] = map[string]bool{}
+		}
+		seen[route][method] = true
+		assert.True(t, documented[route][method], "router route %s %s is undocumented", method, route)
+		return nil
+	})
+	require.NoError(t, err)
+	for path, operations := range documented {
+		for method := range operations {
+			assert.True(t, seen[path][method], "documented operation %s %s is not served", method, path)
+		}
+	}
+}
+
 func TestMutatingEndpointsRejectBadAuth(t *testing.T) {
 	tests := map[string]struct {
 		header string
@@ -340,6 +427,53 @@ func TestReadOnlyTokenReadsEveryReadRoute(t *testing.T) {
 	}
 }
 
+func TestPaginationReturnsNextOffset(t *testing.T) {
+	svc := &fakeService{
+		contracts:   []store.Contract{{Alias: "a"}, {Alias: "b"}, {Alias: "c"}},
+		deployments: []store.Deployment{{WasmHash: "v3"}, {WasmHash: "v2"}, {WasmHash: "v1"}},
+	}
+	router := newTestRouter(t, svc)
+
+	for _, path := range []string{
+		"/v1/contracts?limit=2&offset=0",
+		"/v1/contracts/testnet/counter/history?limit=2&offset=0",
+	} {
+		rec := do(t, router, http.MethodGet, path, nil, nil)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var body map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		var hasMore bool
+		require.NoError(t, json.Unmarshal(body["has_more"], &hasMore))
+		assert.True(t, hasMore)
+		var nextOffset int
+		require.NoError(t, json.Unmarshal(body["next_offset"], &nextOffset))
+		assert.Equal(t, 2, nextOffset)
+	}
+	assert.Equal(t, 3, svc.lastLimit, "the service receives one extra row to detect another page")
+	assert.Equal(t, 0, svc.lastOffset)
+}
+
+func TestPaginationDefaultsAndRejectsInvalidLimits(t *testing.T) {
+	svc := &fakeService{}
+	router := newTestRouter(t, svc)
+
+	rec := do(t, router, http.MethodGet, "/v1/contracts", nil, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, 101, svc.lastLimit)
+
+	for _, path := range []string{
+		"/v1/contracts?limit=0",
+		"/v1/contracts?limit=501",
+		"/v1/contracts?limit=nope",
+		"/v1/contracts?offset=-1",
+	} {
+		t.Run(path, func(t *testing.T) {
+			rec := do(t, router, http.MethodGet, path, nil, nil)
+			assert.Equal(t, http.StatusBadRequest, rec.Code)
+		})
+	}
+}
+
 func TestReadWriteTokenCanReadAndWrite(t *testing.T) {
 	svc := &fakeService{
 		contracts:    []store.Contract{},
@@ -422,7 +556,6 @@ func TestTokenStringRedactsSecret(t *testing.T) {
 	assert.Contains(t, token.String(), "dashboard")
 	assert.NotContains(t, fmt.Sprintf("%v", token), testReadOnlyToken)
 }
-
 func TestBearerSchemeIsCaseInsensitive(t *testing.T) {
 	// RFC 7235 makes the auth scheme case-insensitive; clients do send "bearer".
 	router := newTestRouter(t, &fakeService{deployResult: &deploy.DeployResult{}})

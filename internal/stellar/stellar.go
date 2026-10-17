@@ -154,6 +154,9 @@ type TxResult struct {
 
 	// ResultXDR is a base64 TransactionResult.
 	ResultXDR string
+
+	// FeeCharged is the actual transaction fee from the confirmed result XDR.
+	FeeCharged *int64
 }
 
 // Transaction statuses returned by getTransaction.

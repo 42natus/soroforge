@@ -125,6 +125,9 @@ jobs:
       - name: Coverage summary
         run: go tool cover -func=coverage.out | tail -1
 
+      - name: Lint OpenAPI document
+        run: npx --yes @redocly/cli lint --extends minimal internal/api/openapi.json
+
   docker:
     runs-on: ubuntu-latest
     permissions:

@@ -12,10 +12,11 @@ import (
 
 // UpgradeRequest asks for a tracked contract's bytecode to be replaced.
 type UpgradeRequest struct {
-	Alias   string `json:"alias"`
-	Network string `json:"network,omitempty"`
-	Notes   string `json:"notes,omitempty"`
-	DryRun  bool   `json:"dry_run,omitempty"`
+	Alias     string `json:"alias"`
+	Network   string `json:"network,omitempty"`
+	Notes     string `json:"notes,omitempty"`
+	DryRun    bool   `json:"dry_run,omitempty"`
+	GitCommit string `json:"git_commit,omitempty"`
 }
 
 // UpgradeResult describes a completed or simulated upgrade.
@@ -183,6 +184,8 @@ func (s *Service) Upgrade(ctx context.Context, req UpgradeRequest) (*UpgradeResu
 		"to_wasm_hash", wasmHashHex,
 		"tx_hash", upgrade.Hash)
 
+	gitCommit, dirty := gitMetadata(s.cfg.Dir(), req.GitCommit)
+
 	deployment, err := s.record(ctx, store.Deployment{
 		Alias:          r.Alias,
 		Network:        r.NetworkName,
@@ -193,6 +196,9 @@ func (s *Service) Upgrade(ctx context.Context, req UpgradeRequest) (*UpgradeResu
 		TxHash:         upgrade.Hash,
 		Ledger:         upgrade.Ledger,
 		Notes:          req.Notes,
+		GitCommit:      gitCommit,
+		Dirty:          dirty,
+		FeeCharged:     upgrade.FeeCharged,
 	})
 	if err != nil {
 		return nil, err

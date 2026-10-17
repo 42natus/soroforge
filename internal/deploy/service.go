@@ -225,8 +225,9 @@ func (s *Service) requireSigner() (stellar.Signer, error) {
 
 // txResult describes one submitted transaction.
 type txResult struct {
-	Hash   string
-	Ledger uint32
+	Hash       string
+	Ledger     uint32
+	FeeCharged *int64
 
 	// Simulation is retained so callers can read the host function's return
 	// value — for a create, that is the new contract's address.
@@ -319,6 +320,7 @@ func (s *Service) runTransaction(
 	return txResult{
 		Hash:        confirmed.Hash,
 		Ledger:      confirmed.Ledger,
+		FeeCharged:  confirmed.FeeCharged,
 		Simulation:  sim,
 		EnvelopeXDR: signedXDR,
 	}, nil
