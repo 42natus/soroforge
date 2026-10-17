@@ -74,9 +74,9 @@ type Options struct {
 
 // NewRouter builds the HTTP handler.
 //
-// It returns an error rather than a router when the token is unusable, so that
-// a misconfigured server fails at startup instead of serving unauthenticated
-// deploy endpoints.
+// It returns an error rather than a router when the tokens are unusable, so
+// that a misconfigured server fails at startup instead of serving
+// unauthenticated deploy endpoints.
 func NewRouter(opts Options) (http.Handler, error) {
 	if opts.Service == nil {
 		return nil, fmt.Errorf("api: service is required")
