@@ -63,8 +63,14 @@ func printDeployResult(r *deploy.DeployResult) error {
 	if r.CreateTxHash != "" {
 		fmt.Fprintf(w, "  Create tx     %s\n", r.CreateTxHash)
 	}
+	if r.InitTxHash != "" {
+		fmt.Fprintf(w, "  Init tx       %s\n", r.InitTxHash)
+	}
 	if r.Ledger != 0 {
 		fmt.Fprintf(w, "  Ledger        %d\n", r.Ledger)
+	}
+	if r.Deployment != nil && r.Deployment.CIRunURL != "" {
+		fmt.Fprintf(w, "  CI run        %s\n", r.Deployment.CIRunURL)
 	}
 	printCatalog(w, r.Catalog)
 
@@ -75,6 +81,9 @@ func printDeployResult(r *deploy.DeployResult) error {
 		}
 		if r.CreateEnvelopeXDR != "" {
 			fmt.Fprintf(w, "\n  create:\n  %s\n", r.CreateEnvelopeXDR)
+		}
+		if r.InitEnvelopeXDR != "" {
+			fmt.Fprintf(w, "\n  init:\n  %s\n", r.InitEnvelopeXDR)
 		}
 		fmt.Fprintf(w, "\nRe-run without --dry-run to submit.\n")
 	}
@@ -120,6 +129,9 @@ func printUpgradeResult(r *deploy.UpgradeResult) error {
 	if r.Ledger != 0 {
 		fmt.Fprintf(w, "  Ledger        %d\n", r.Ledger)
 	}
+	if r.Deployment != nil && r.Deployment.CIRunURL != "" {
+		fmt.Fprintf(w, "  CI run        %s\n", r.Deployment.CIRunURL)
+	}
 	printCatalog(w, r.Catalog)
 
 	if r.DryRun && r.UpgradeEnvelopeXDR != "" {
@@ -163,9 +175,49 @@ func printUploadResult(r *deploy.UploadResult) error {
 	if r.Ledger != 0 {
 		fmt.Fprintf(w, "  Ledger        %d\n", r.Ledger)
 	}
+	if r.Deployment != nil && r.Deployment.CIRunURL != "" {
+		fmt.Fprintf(w, "  CI run        %s\n", r.Deployment.CIRunURL)
+	}
 
 	if r.DryRun && r.UploadEnvelopeXDR != "" {
 		fmt.Fprintf(w, "\nAssembled upload envelope (unsigned):\n\n  %s\n", r.UploadEnvelopeXDR)
+		fmt.Fprintf(w, "\nRe-run without --dry-run to submit.\n")
+	}
+
+	return nil
+}
+
+func printInvokeResult(r *deploy.InvokeResult) error {
+	if flags.jsonOutput {
+		return printJSON(r)
+	}
+
+	w := out()
+
+	if r.DryRun {
+		fmt.Fprintf(w, "Dry run — nothing was submitted and nothing was recorded.\n\n")
+	} else {
+		fmt.Fprintf(w, "Invoked %s on %s (%s).\n\n", r.Function, r.Alias, r.Network)
+	}
+
+	fmt.Fprintf(w, "  Contract ID   %s\n", r.ContractID)
+	fmt.Fprintf(w, "  Function      %s\n", r.Function)
+	if len(r.Args) > 0 {
+		fmt.Fprintf(w, "  Arguments     %s\n", strings.Join(r.Args, " "))
+	}
+	fmt.Fprintf(w, "  Deployer      %s\n", r.Deployer)
+	if r.TxHash != "" {
+		fmt.Fprintf(w, "  Tx hash       %s\n", r.TxHash)
+	}
+	if r.Ledger != 0 {
+		fmt.Fprintf(w, "  Ledger        %d\n", r.Ledger)
+	}
+	if r.Deployment != nil && r.Deployment.CIRunURL != "" {
+		fmt.Fprintf(w, "  CI run        %s\n", r.Deployment.CIRunURL)
+	}
+
+	if r.DryRun && r.EnvelopeXDR != "" {
+		fmt.Fprintf(w, "\nAssembled invocation envelope (unsigned):\n\n  %s\n", r.EnvelopeXDR)
 		fmt.Fprintf(w, "\nRe-run without --dry-run to submit.\n")
 	}
 
@@ -222,7 +274,7 @@ func printHistory(alias, network string, deployments []store.Deployment) error {
 	fmt.Fprintf(out(), "History for %s on %s (newest first):\n\n", alias, network)
 
 	tw := tabwriter.NewWriter(out(), 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "WHEN\tACTION\tWASM HASH\tDEPLOYER\tLEDGER\tFEE (STROOPS)\tFEE (XLM)\tCOMMIT\tTX\tNOTES")
+	fmt.Fprintln(tw, "WHEN\tACTION\tWASM HASH\tDEPLOYER\tLEDGER\tFEE (STROOPS)\tFEE (XLM)\tCOMMIT\tTX\tCI RUN\tNOTES")
 	for _, d := range deployments {
 		feeStroops, feeXLM := "-", "-"
 		if d.FeeCharged != nil {
@@ -236,7 +288,25 @@ func printHistory(alias, network string, deployments []store.Deployment) error {
 				commit += "*"
 			}
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		ciRun := "-"
+		if d.CIRunURL != "" {
+			ciRun = d.CIRunURL
+		}
+		notes := d.Notes
+		if d.Action == store.ActionInvoke && d.FnName != "" {
+			inv := d.FnName
+			if d.FnArgs != "" {
+				inv += "(" + d.FnArgs + ")"
+			} else {
+				inv += "()"
+			}
+			if notes != "" {
+				notes = inv + " - " + notes
+			} else {
+				notes = inv
+			}
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			formatTime(d.CreatedAt),
 			d.Action,
 			shortHash(d.WasmHash),
@@ -246,7 +316,8 @@ func printHistory(alias, network string, deployments []store.Deployment) error {
 			feeXLM,
 			commit,
 			shortHash(d.TxHash),
-			truncate(d.Notes, 40),
+			ciRun,
+			truncate(notes, 40),
 		)
 	}
 	return tw.Flush()

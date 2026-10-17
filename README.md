@@ -261,6 +261,25 @@ Adding a type means one case in
 [`internal/config/args.go`](internal/config/args.go) and one table entry in its
 test.
 
+### Initializers (contracts without constructors)
+
+Contracts written before constructors existed on Soroban are initialized by an explicit function call (such as `initialize`) after deployment. SoroForge supports this via `init_fn` and `init_args`:
+
+```yaml
+contracts:
+  counter:
+    wasm: ./counter.wasm
+    init_fn: initialize
+    init_args:
+      - {type: address, value: GABC...}
+      - {type: u32, value: 1}
+```
+
+> [!WARNING]
+> **Front-running risk:** An initializer is submitted as a separate transaction immediately after the contract is created. Between contract creation and initializer confirmation, there is a window where another party could attempt to front-run the initializer call and claim ownership.
+>
+> **Recommendation:** For all new Soroban smart contracts, use **constructors** (`constructor_args`) instead of initializers. Constructors execute atomically during contract creation, eliminating the front-running window entirely. Use `init_fn` only when deploying legacy contracts that do not support constructors. Note that `constructor_args` and `init_fn` are mutually exclusive.
+
 ### Environment variables
 
 | Variable | Purpose |

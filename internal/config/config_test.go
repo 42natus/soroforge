@@ -259,6 +259,56 @@ contracts:
 `,
 			wantErr: "constructor_args[0]",
 		},
+		"both constructor_args and init_fn": {
+			config: `
+version: 1
+default_network: testnet
+networks:
+  testnet:
+    rpc_url: https://rpc.example.org
+    passphrase: "Test SDF Network ; September 2015"
+contracts:
+  counter:
+    wasm: ./c.wasm
+    constructor_args:
+      - {type: u32, value: 7}
+    init_fn: initialize
+`,
+			wantErr: "cannot configure both constructor_args and init_fn",
+		},
+		"init_args without init_fn": {
+			config: `
+version: 1
+default_network: testnet
+networks:
+  testnet:
+    rpc_url: https://rpc.example.org
+    passphrase: "Test SDF Network ; September 2015"
+contracts:
+  counter:
+    wasm: ./c.wasm
+    init_args:
+      - {type: u32, value: 7}
+`,
+			wantErr: "init_args: init_fn must be set",
+		},
+		"invalid init_args": {
+			config: `
+version: 1
+default_network: testnet
+networks:
+  testnet:
+    rpc_url: https://rpc.example.org
+    passphrase: "Test SDF Network ; September 2015"
+contracts:
+  counter:
+    wasm: ./c.wasm
+    init_fn: initialize
+    init_args:
+      - {type: u32, value: "not a number"}
+`,
+			wantErr: "init_args[0]",
+		},
 		"invalid salt": {
 			config: `
 version: 1

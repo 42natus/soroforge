@@ -39,12 +39,15 @@ const (
 	// a proposal and a separate party later calls the contract's upgrade
 	// function. No contract exists yet, so the record has no contract id.
 	ActionUpload Action = "upload"
+
+	// ActionInvoke is an administrative function call against a deployed contract.
+	ActionInvoke Action = "invoke"
 )
 
 // Valid reports whether a is a recognised action. The database enforces this
 // too; checking here produces a better error than a constraint violation.
 func (a Action) Valid() bool {
-	return a == ActionDeploy || a == ActionUpgrade || a == ActionUpload
+	return a == ActionDeploy || a == ActionUpgrade || a == ActionUpload || a == ActionInvoke
 }
 
 func (a Action) String() string { return string(a) }
@@ -96,6 +99,17 @@ type Deployment struct {
 
 	// Notes is free-form operator context, e.g. a ticket or release tag.
 	Notes string `json:"notes,omitempty"`
+
+	// CIRunURL is the CI pipeline run URL when deployed from GitHub Actions or
+	// GitLab CI. Outside CI this is empty. It answers "which commit and merge
+	// triggered this deploy" for audit purposes.
+	CIRunURL string `json:"ci_run_url,omitempty"`
+
+	// FnName is the function invoked on the contract, when action is ActionInvoke.
+	FnName string `json:"fn_name,omitempty"`
+
+	// FnArgs is the string representation of invocation arguments, when action is ActionInvoke.
+	FnArgs string `json:"fn_args,omitempty"`
 
 	CreatedAt time.Time `json:"created_at"`
 }
@@ -159,8 +173,8 @@ func (d Deployment) Validate() error {
 	case d.WasmHash == "":
 		return fmt.Errorf("deployment: wasm_hash is required")
 	case !d.Action.Valid():
-		return fmt.Errorf("deployment: action must be %q, %q, or %q, got %q",
-			ActionDeploy, ActionUpgrade, ActionUpload, d.Action)
+		return fmt.Errorf("deployment: action must be %q, %q, %q, or %q, got %q",
+			ActionDeploy, ActionUpgrade, ActionUpload, ActionInvoke, d.Action)
 	case d.DeployerPubkey == "":
 		return fmt.Errorf("deployment: deployer_pubkey is required")
 	}

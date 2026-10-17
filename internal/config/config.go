@@ -88,6 +88,13 @@ type Contract struct {
 	// instantiation. Empty is valid and common.
 	ConstructorArgs []Arg `yaml:"constructor_args"`
 
+	// InitFunc is the contract entrypoint invoked immediately after
+	// instantiation to initialize contracts that lack constructors.
+	InitFunc string `yaml:"init_fn"`
+
+	// InitArgs are passed to the initializer entrypoint named by InitFunc.
+	InitArgs []Arg `yaml:"init_args"`
+
 	// UpgradeFunc overrides the contract function invoked by `soroforge
 	// upgrade`. Defaults to DefaultUpgradeFunc.
 	UpgradeFunc string `yaml:"upgrade_fn"`

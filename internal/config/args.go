@@ -9,6 +9,7 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/strkey"
 	"github.com/stellar/go-stellar-sdk/xdr"
+	"gopkg.in/yaml.v3"
 )
 
 // Arg is a contract argument written in soroforge.yaml.
@@ -354,4 +355,75 @@ func parseUint(s string, bits int) (uint64, error) {
 
 func parseInt(s string, bits int) (int64, error) {
 	return strconv.ParseInt(strings.TrimSpace(s), 10, bits)
+}
+
+// ParseCLIArg parses a command-line string into an Arg.
+//
+// It accepts two forms:
+//  1. Compact type:value syntax, e.g. "u32:7", "string:hello", "address:GABC...", "bool:true", "void"
+//  2. Full YAML/JSON syntax, e.g. "{type: u32, value: 7}", "{type: vec, value: [{type: u32, value: 1}]}"
+func ParseCLIArg(s string) (Arg, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return Arg{}, fmt.Errorf("argument cannot be empty")
+	}
+
+	// Case 1: Full YAML/JSON object
+	if strings.HasPrefix(s, "{") {
+		var a Arg
+		if err := yaml.Unmarshal([]byte(s), &a); err == nil && a.Type != "" {
+			if _, err := a.ToScVal(); err != nil {
+				return Arg{}, err
+			}
+			return a, nil
+		}
+	}
+
+	// Case 2: Special single-keyword "void"
+	if strings.EqualFold(s, ArgVoid) {
+		return Arg{Type: ArgVoid}, nil
+	}
+
+	// Case 3: Compact type:value syntax
+	parts := strings.SplitN(s, ":", 2)
+	if len(parts) == 2 {
+		typePart := strings.ToLower(strings.TrimSpace(parts[0]))
+		valPart := strings.TrimSpace(parts[1])
+
+		var yamlStr string
+		switch typePart {
+		case ArgString, ArgU128, ArgI128:
+			if !strings.HasPrefix(valPart, "\"") && !strings.HasPrefix(valPart, "'") {
+				yamlStr = fmt.Sprintf("{type: %s, value: %q}", typePart, valPart)
+			} else {
+				yamlStr = fmt.Sprintf("{type: %s, value: %s}", typePart, valPart)
+			}
+		default:
+			yamlStr = fmt.Sprintf("{type: %s, value: %s}", typePart, valPart)
+		}
+
+		var a Arg
+		if err := yaml.Unmarshal([]byte(yamlStr), &a); err == nil {
+			if _, err := a.ToScVal(); err == nil {
+				return a, nil
+			} else {
+				return Arg{}, fmt.Errorf("invalid %s value %q: %w", typePart, valPart, err)
+			}
+		}
+	}
+
+	return Arg{}, fmt.Errorf("invalid typed argument %q (expected type:value e.g. u32:7 or {type: ..., value: ...})", s)
+}
+
+// ParseCLIArgs converts a slice of command-line argument strings into typed Args.
+func ParseCLIArgs(args []string) ([]Arg, error) {
+	out := make([]Arg, 0, len(args))
+	for i, a := range args {
+		arg, err := ParseCLIArg(a)
+		if err != nil {
+			return nil, fmt.Errorf("arg[%d]: %w", i, err)
+		}
+		out = append(out, arg)
+	}
+	return out, nil
 }

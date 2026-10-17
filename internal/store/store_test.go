@@ -306,6 +306,34 @@ func runStoreSuite(t *testing.T, newStore func(t *testing.T) store.Store) {
 		assert.Equal(t, fee, *history[0].FeeCharged)
 	})
 
+	t.Run("record deployment persists ci_run_url, fn_name, and fn_args", func(t *testing.T) {
+		s := newStore(t)
+
+		saved, err := s.RecordDeployment(ctx, store.Deployment{
+			Alias:          "counter",
+			Network:        "testnet",
+			ContractID:     "C1",
+			WasmHash:       "hash1",
+			Action:         store.ActionInvoke,
+			DeployerPubkey: "GABC",
+			CIRunURL:       "https://github.com/soroworks/soroforge/actions/runs/12345",
+			FnName:         "increment",
+			FnArgs:         "u32:5",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "https://github.com/soroworks/soroforge/actions/runs/12345", saved.CIRunURL)
+		assert.Equal(t, "increment", saved.FnName)
+		assert.Equal(t, "u32:5", saved.FnArgs)
+
+		history, err := s.History(ctx, "testnet", "counter")
+		require.NoError(t, err)
+		require.Len(t, history, 1)
+		assert.Equal(t, store.ActionInvoke, history[0].Action)
+		assert.Equal(t, "https://github.com/soroworks/soroforge/actions/runs/12345", history[0].CIRunURL)
+		assert.Equal(t, "increment", history[0].FnName)
+		assert.Equal(t, "u32:5", history[0].FnArgs)
+	})
+
 	t.Run("invalid records are rejected", func(t *testing.T) {
 		s := newStore(t)
 
@@ -356,6 +384,7 @@ func TestActionValid(t *testing.T) {
 	assert.True(t, store.ActionDeploy.Valid())
 	assert.True(t, store.ActionUpgrade.Valid())
 	assert.True(t, store.ActionUpload.Valid())
+	assert.True(t, store.ActionInvoke.Valid())
 	assert.False(t, store.Action("rollback").Valid())
 	assert.False(t, store.Action("").Valid())
 }

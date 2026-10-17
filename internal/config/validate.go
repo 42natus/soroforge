@@ -119,6 +119,20 @@ func validateContract(alias string, c Contract) []string {
 		}
 	}
 
+	if strings.TrimSpace(c.InitFunc) != "" && len(c.ConstructorArgs) > 0 {
+		problems = append(problems, fmt.Sprintf("%s: cannot configure both constructor_args and init_fn", prefix))
+	}
+
+	for i, arg := range c.InitArgs {
+		if _, err := arg.ToScVal(); err != nil {
+			problems = append(problems, fmt.Sprintf("%s.init_args[%d]: %v", prefix, i, err))
+		}
+	}
+
+	if len(c.InitArgs) > 0 && strings.TrimSpace(c.InitFunc) == "" {
+		problems = append(problems, prefix+".init_args: init_fn must be set when init_args are configured")
+	}
+
 	if c.Salt != "" {
 		if _, err := ParseSalt(c.Salt); err != nil {
 			problems = append(problems, fmt.Sprintf("%s.salt: %v", prefix, err))

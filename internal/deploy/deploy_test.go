@@ -2,6 +2,7 @@ package deploy_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -456,4 +457,111 @@ contracts:
 	require.Len(t, args, 2)
 	assert.Equal(t, xdr.Uint32(7), *args[0].U32)
 	assert.Equal(t, xdr.ScString("SoroForge"), *args[1].Str)
+}
+
+func TestDeployWithInitializerSuccess(t *testing.T) {
+	h := newHarness(t, harnessOptions{configBody: `
+version: 1
+default_network: testnet
+networks:
+  testnet:
+    rpc_url: https://rpc.example.org
+    passphrase: "Test SDF Network ; September 2015"
+contracts:
+  counter:
+    wasm: ./counter.wasm
+    init_fn: initialize
+    init_args:
+      - {type: u32, value: 42}
+`})
+
+	ctx := context.Background()
+	result, err := h.svc.Deploy(ctx, deploy.DeployRequest{Alias: "counter"})
+	require.NoError(t, err)
+
+	assert.NotEmpty(t, result.ContractID)
+	assert.NotEmpty(t, result.CreateTxHash)
+	assert.NotEmpty(t, result.InitTxHash)
+	assert.Equal(t, 3, h.client.SendCount(), "upload + create + init")
+
+	// Store must record the deploy
+	history, err := h.store.History(ctx, "testnet", "counter")
+	require.NoError(t, err)
+	require.Len(t, history, 1)
+	assert.Equal(t, result.ContractID, history[0].ContractID)
+}
+
+func TestDeployWithInitializerDryRun(t *testing.T) {
+	h := newHarness(t, harnessOptions{configBody: `
+version: 1
+default_network: testnet
+networks:
+  testnet:
+    rpc_url: https://rpc.example.org
+    passphrase: "Test SDF Network ; September 2015"
+contracts:
+  counter:
+    wasm: ./counter.wasm
+    init_fn: initialize
+    init_args:
+      - {type: u32, value: 42}
+`})
+
+	result, err := h.svc.Deploy(context.Background(), deploy.DeployRequest{
+		Alias:  "counter",
+		DryRun: true,
+	})
+	require.NoError(t, err)
+	assert.True(t, result.DryRun)
+	assert.NotEmpty(t, result.InitEnvelopeXDR)
+	assert.Zero(t, h.client.SendCount())
+
+	var decoded xdr.TransactionEnvelope
+	require.NoError(t, xdr.SafeUnmarshalBase64(result.InitEnvelopeXDR, &decoded))
+	op := decoded.V1.Tx.Operations[0].Body.MustInvokeHostFunctionOp()
+	assert.Equal(t, xdr.ScSymbol("initialize"), op.HostFunction.InvokeContract.FunctionName)
+	require.Len(t, op.HostFunction.InvokeContract.Args, 1)
+	assert.Equal(t, xdr.Uint32(42), *op.HostFunction.InvokeContract.Args[0].U32)
+}
+
+func TestDeployWithInitializerFailureReportsUninitialised(t *testing.T) {
+	h := newHarness(t, harnessOptions{configBody: `
+version: 1
+default_network: testnet
+networks:
+  testnet:
+    rpc_url: https://rpc.example.org
+    passphrase: "Test SDF Network ; September 2015"
+contracts:
+  counter:
+    wasm: ./counter.wasm
+    init_fn: initialize
+`})
+
+	callCount := 0
+	h.client.SendFunc = func(ctx context.Context, signedTxXDR string) (stellar.SendResult, error) {
+		callCount++
+		// Upload = 1, Create = 2, Init = 3
+		if callCount == 3 {
+			return stellar.SendResult{}, fmt.Errorf("initialization tx rejected")
+		}
+		return stellar.SendResult{Status: stellar.SendStatusPending, Hash: "txhash"}, nil
+	}
+
+	ctx := context.Background()
+	_, err := h.svc.Deploy(ctx, deploy.DeployRequest{Alias: "counter"})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "deployed at")
+	assert.ErrorContains(t, err, "but uninitialised")
+
+	// Even though initialization failed, the contract must be tracked in the store
+	// because it exists on-chain.
+	tracked, err := h.store.GetContract(ctx, "testnet", "counter")
+	require.NoError(t, err)
+	assert.Equal(t, h.contractID, tracked.ContractID)
+
+	history, err := h.store.History(ctx, "testnet", "counter")
+	require.NoError(t, err)
+	require.Len(t, history, 1)
+	assert.Contains(t, history[0].Notes, "uninitialised")
 }

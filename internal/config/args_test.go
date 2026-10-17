@@ -364,3 +364,60 @@ func uint32Ptr(v uint32) *xdr.Uint32 {
 	x := xdr.Uint32(v)
 	return &x
 }
+
+func TestParseCLIArg(t *testing.T) {
+	tests := []struct {
+		input   string
+		wantTyp string
+	}{
+		{"u32:7", ArgU32},
+		{"i32:-10", ArgI32},
+		{"u64:100", ArgU64},
+		{"i64:-100", ArgI64},
+		{"u128:1000", ArgU128},
+		{"i128:-1000", ArgI128},
+		{"bool:true", ArgBool},
+		{"bool:false", ArgBool},
+		{"string:hello", ArgString},
+		{"string:\"hello world\"", ArgString},
+		{"symbol:transfer", ArgSymbol},
+		{"bytes:deadbeef", ArgBytes},
+		{"address:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF", ArgAddress},
+		{"void", ArgVoid},
+		{"{type: u32, value: 42}", ArgU32},
+		{"{type: vec, value: [{type: u32, value: 1}, {type: u32, value: 2}]}", ArgVec},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			arg, err := ParseCLIArg(tc.input)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantTyp, arg.Type)
+			_, err = arg.ToScVal()
+			require.NoError(t, err)
+		})
+	}
+
+	t.Run("invalid arguments", func(t *testing.T) {
+		_, err := ParseCLIArg("")
+		assert.Error(t, err)
+
+		_, err = ParseCLIArg("u32:not_a_number")
+		assert.Error(t, err)
+
+		_, err = ParseCLIArg("invalidformat")
+		assert.Error(t, err)
+	})
+}
+
+func TestParseCLIArgs(t *testing.T) {
+	args, err := ParseCLIArgs([]string{"u32:7", "string:test", "void"})
+	require.NoError(t, err)
+	require.Len(t, args, 3)
+	assert.Equal(t, ArgU32, args[0].Type)
+	assert.Equal(t, ArgString, args[1].Type)
+	assert.Equal(t, ArgVoid, args[2].Type)
+
+	_, err = ParseCLIArgs([]string{"u32:7", "bad"})
+	assert.ErrorContains(t, err, "arg[1]")
+}

@@ -217,3 +217,122 @@ func TestUpgradeSurfacesContractRejection(t *testing.T) {
 	assert.ErrorContains(t, err, "Unauthorized")
 	assert.ErrorContains(t, err, "invoke upgrade on")
 }
+
+func TestUpgradeToWasmHashSuccess(t *testing.T) {
+	// Upgrade directly to a known on-chain hash, without local WASM build.
+	h := newHarness(t, harnessOptions{})
+	currentHash := stellar.WasmHash([]byte(testWasm))
+	trackContract(t, h, currentHash)
+
+	targetHash := stellar.WasmHash([]byte(upgradedWasm))
+	targetHashHex := stellar.HashHex(targetHash)
+	require.NoError(t, h.client.SetWasmUploaded(targetHash))
+
+	ctx := context.Background()
+	result, err := h.svc.Upgrade(ctx, deploy.UpgradeRequest{
+		Alias:    "counter",
+		WasmHash: targetHashHex,
+		Notes:    "rollback to previous hash",
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, h.contractID, result.ContractID)
+	assert.Equal(t, stellar.HashHex(currentHash), result.PreviousWasmHash)
+	assert.Equal(t, targetHashHex, result.WasmHash)
+	assert.True(t, result.UploadSkipped)
+	assert.Equal(t, 1, h.client.SendCount(), "only the upgrade invocation should be submitted")
+
+	history, err := h.store.History(ctx, "testnet", "counter")
+	require.NoError(t, err)
+	require.Len(t, history, 1)
+	assert.Equal(t, targetHashHex, history[0].WasmHash)
+	assert.Equal(t, "rollback to previous hash", history[0].Notes)
+}
+
+func TestUpgradeToWasmHashShortPrefix(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	currentHash := stellar.WasmHash([]byte("live-code"))
+	trackContract(t, h, currentHash)
+
+	targetHash := stellar.WasmHash([]byte("historical-code"))
+	targetHashHex := stellar.HashHex(targetHash)
+	require.NoError(t, h.client.SetWasmUploaded(targetHash))
+
+	// Seed targetHash in history
+	ctx := context.Background()
+	_, err := h.store.RecordDeployment(ctx, store.Deployment{
+		Alias:          "counter",
+		Network:        "testnet",
+		ContractID:     h.contractID,
+		WasmHash:       targetHashHex,
+		Action:         store.ActionDeploy,
+		DeployerPubkey: "GABC",
+	})
+	require.NoError(t, err)
+
+	prefix := targetHashHex[:12]
+	result, err := h.svc.Upgrade(ctx, deploy.UpgradeRequest{
+		Alias:    "counter",
+		WasmHash: prefix,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, targetHashHex, result.WasmHash)
+}
+
+func TestUpgradeToWasmHashAmbiguousPrefix(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	trackContract(t, h, stellar.WasmHash([]byte("live-code")))
+
+	ctx := context.Background()
+	_, err := h.store.RecordDeployment(ctx, store.Deployment{
+		Alias:          "counter",
+		Network:        "testnet",
+		ContractID:     h.contractID,
+		WasmHash:       "aaaa1111222233334444555566667777888899990000aaaabbbbccccddddeeee01",
+		Action:         store.ActionDeploy,
+		DeployerPubkey: "GABC",
+	})
+	require.NoError(t, err)
+	_, err = h.store.RecordDeployment(ctx, store.Deployment{
+		Alias:          "counter",
+		Network:        "testnet",
+		ContractID:     h.contractID,
+		WasmHash:       "aaaa1111222233334444555566667777888899990000aaaabbbbccccddddeeee02",
+		Action:         store.ActionUpgrade,
+		DeployerPubkey: "GABC",
+	})
+	require.NoError(t, err)
+
+	_, err = h.svc.Upgrade(ctx, deploy.UpgradeRequest{
+		Alias:    "counter",
+		WasmHash: "aaaa11",
+	})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "ambiguous wasm hash prefix")
+}
+
+func TestUpgradeToWasmHashUnknownPrefix(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	trackContract(t, h, stellar.WasmHash([]byte("live-code")))
+
+	ctx := context.Background()
+	_, err := h.svc.Upgrade(ctx, deploy.UpgradeRequest{
+		Alias:    "counter",
+		WasmHash: "bbbb",
+	})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "no wasm hash starting with \"bbbb\" found in history")
+}
+
+func TestUpgradeToWasmHashMissingOnChain(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	trackContract(t, h, stellar.WasmHash([]byte("live-code")))
+
+	missingHash := "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff"
+	_, err := h.svc.Upgrade(context.Background(), deploy.UpgradeRequest{
+		Alias:    "counter",
+		WasmHash: missingHash,
+	})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "does not exist on-chain")
+}

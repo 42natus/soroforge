@@ -120,6 +120,7 @@ func (s *Service) Upload(ctx context.Context, req UploadRequest) (*UploadResult,
 		TxHash:         upload.Hash,
 		Ledger:         upload.Ledger,
 		Notes:          req.Notes,
+		CIRunURL:       ciRunURL(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf(

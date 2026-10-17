@@ -160,11 +160,11 @@ func (p *Postgres) ListContractsPage(ctx context.Context, network string, limit,
 
 const recordDeploymentSQL = `
 INSERT INTO deployments (
-    alias, network, contract_id, wasm_hash, action, deployer_pubkey, tx_hash, ledger, git_commit, dirty, fee_charged, notes
+    alias, network, contract_id, wasm_hash, action, deployer_pubkey, tx_hash, ledger, git_commit, dirty, fee_charged, notes, ci_run_url, fn_name, fn_args
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 RETURNING id, alias, network, contract_id, wasm_hash, action,
-		deployer_pubkey, tx_hash, ledger, git_commit, dirty, fee_charged, notes, created_at`
+		deployer_pubkey, tx_hash, ledger, git_commit, dirty, fee_charged, notes, ci_run_url, fn_name, fn_args, created_at`
 
 // RecordDeployment implements Store.
 func (p *Postgres) RecordDeployment(ctx context.Context, d Deployment) (Deployment, error) {
@@ -201,10 +201,22 @@ func (p *Postgres) RecordDeployment(ctx context.Context, d Deployment) (Deployme
 	if d.GitCommit != "" {
 		dirty = &d.Dirty
 	}
+	var ciRunURL *string
+	if d.CIRunURL != "" {
+		ciRunURL = &d.CIRunURL
+	}
+	var fnName *string
+	if d.FnName != "" {
+		fnName = &d.FnName
+	}
+	var fnArgs *string
+	if d.FnArgs != "" {
+		fnArgs = &d.FnArgs
+	}
 
 	row := p.pool.QueryRow(ctx, recordDeploymentSQL,
 		d.Alias, d.Network, d.ContractID, d.WasmHash, string(d.Action),
-		d.DeployerPubkey, txHash, ledger, gitCommit, dirty, feeCharged, notes)
+		d.DeployerPubkey, txHash, ledger, gitCommit, dirty, feeCharged, notes, ciRunURL, fnName, fnArgs)
 
 	out, err := scanDeployment(row)
 	if err != nil {
@@ -215,7 +227,7 @@ func (p *Postgres) RecordDeployment(ctx context.Context, d Deployment) (Deployme
 
 const historySQL = `
 SELECT id, alias, network, contract_id, wasm_hash, action,
-	deployer_pubkey, tx_hash, ledger, git_commit, dirty, fee_charged, notes, created_at
+	deployer_pubkey, tx_hash, ledger, git_commit, dirty, fee_charged, notes, ci_run_url, fn_name, fn_args, created_at
 FROM deployments
 WHERE network = $1 AND alias = $2
 ORDER BY created_at DESC, id DESC`
@@ -296,9 +308,12 @@ func scanDeployment(s scanner) (Deployment, error) {
 		txDirty     *bool
 		txFee       *int64
 		notes       *string
+		ciRunURL    *string
+		fnName      *string
+		fnArgs      *string
 	)
 	err := s.Scan(&d.ID, &d.Alias, &d.Network, &d.ContractID, &d.WasmHash, &action,
-		&d.DeployerPubkey, &txHash, &ledger, &txGitCommit, &txDirty, &txFee, &notes, &d.CreatedAt)
+		&d.DeployerPubkey, &txHash, &ledger, &txGitCommit, &txDirty, &txFee, &notes, &ciRunURL, &fnName, &fnArgs, &d.CreatedAt)
 	if err != nil {
 		return Deployment{}, err
 	}
@@ -321,6 +336,15 @@ func scanDeployment(s scanner) (Deployment, error) {
 	}
 	if notes != nil {
 		d.Notes = *notes
+	}
+	if ciRunURL != nil {
+		d.CIRunURL = *ciRunURL
+	}
+	if fnName != nil {
+		d.FnName = *fnName
+	}
+	if fnArgs != nil {
+		d.FnArgs = *fnArgs
 	}
 	return d, nil
 }
