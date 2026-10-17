@@ -1,16 +1,9 @@
 package main
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
-	"os"
-	"os/signal"
 	"path/filepath"
-	"syscall"
-	"time"
 
 	"github.com/soroworks/soroforge/internal/api"
 	"github.com/soroworks/soroforge/internal/config"
@@ -251,17 +244,25 @@ The non-zero exit on drift makes this usable as a CI gate.`,
 }
 
 func newServeCmd() *cobra.Command {
-	var addr string
+	var (
+		addr    string
+		tlsCert string
+		tlsKey  string
+	)
 
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Run the HTTP API for CI pipelines",
 		Long: `Serve the same operations as the CLI over HTTP.
 
-Every endpoint requires a bearer token from SOROFORGE_API_TOKEN; the server
-refuses to start without one, because it can deploy contracts using the
-configured signing key. It binds 127.0.0.1 by default — override with --addr
-only when you have put authentication and TLS in front of it.
+Every endpoint requires a bearer token from SOROFORGE_API_TOKEN (or the
+comma-separated SOROFORGE_API_TOKENS); the server refuses to start without
+one, because it can deploy contracts using the configured signing key.
+
+It binds 127.0.0.1 by default. To expose it beyond loopback without a
+proxy, pass --tls-cert and --tls-key (or set SOROFORGE_TLS_CERT and
+SOROFORGE_TLS_KEY); binding a non-loopback address without TLS logs a
+warning. Set both or neither — one alone is a startup error.
 
 Endpoints:
   GET  /health
@@ -283,6 +284,11 @@ Endpoints:
 				listenAddr = a.cfg.Env.ListenAddr()
 			}
 
+			certFile, keyFile, err := resolveTLSFiles(tlsCert, tlsKey, a.cfg.Env)
+			if err != nil {
+				return err
+			}
+
 			rateLimit, err := a.cfg.Env.RateLimit()
 			if err != nil {
 				return err
@@ -302,48 +308,35 @@ Endpoints:
 				return err
 			}
 
-			return serve(cmd.Context(), api.NewServer(listenAddr, handler))
+			srv := api.NewServer(listenAddr, handler)
+
+			if certFile == "" && !isLoopbackAddr(listenAddr) {
+				slog.Warn(
+					"serving plaintext HTTP on a non-loopback address; this process holds a signing key",
+					"addr", listenAddr,
+					"hint", "set --tls-cert/--tls-key or SOROFORGE_TLS_CERT/SOROFORGE_TLS_KEY, or front it with a trusted proxy")
+			}
+
+			if certFile != "" {
+				tlsCfg, err := tlsConfig(certFile, keyFile)
+				if err != nil {
+					return err
+				}
+				srv.TLSConfig = tlsCfg
+			}
+
+			return serve(cmd.Context(), srv, certFile != "")
 		},
 	}
 
 	cmd.Flags().StringVar(&addr, "addr", "",
 		"listen address (default: $SOROFORGE_API_ADDR or 127.0.0.1:8080)")
+	cmd.Flags().StringVar(&tlsCert, "tls-cert", "",
+		"PEM certificate for TLS (default: $SOROFORGE_TLS_CERT); requires --tls-key")
+	cmd.Flags().StringVar(&tlsKey, "tls-key", "",
+		"PEM private key for TLS (default: $SOROFORGE_TLS_KEY); requires --tls-cert")
 
 	return cmd
-}
-
-// serve runs the HTTP server until interrupted, then shuts it down gracefully
-// so an in-flight deploy is not cut off mid-submission.
-func serve(ctx context.Context, srv *http.Server) error {
-	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	errCh := make(chan error, 1)
-	go func() {
-		slog.Info("HTTP API listening", "addr", srv.Addr)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
-			return
-		}
-		errCh <- nil
-	}()
-
-	select {
-	case err := <-errCh:
-		return err
-	case <-ctx.Done():
-		slog.Info("shutting down, waiting for in-flight requests")
-
-		// Long enough for a deploy that is already waiting on confirmation to
-		// finish rather than being abandoned half-recorded.
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("shutdown: %w", err)
-		}
-		return nil
-	}
 }
 
 func newMigrateCmd() *cobra.Command {

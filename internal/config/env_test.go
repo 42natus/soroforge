@@ -177,6 +177,41 @@ func TestSigningSeedErrors(t *testing.T) {
 	})
 }
 
+func TestTLSFiles(t *testing.T) {
+	t.Run("neither configured", func(t *testing.T) {
+		cert, key, err := Env{}.TLSFiles()
+		require.NoError(t, err)
+		assert.Empty(t, cert)
+		assert.Empty(t, key)
+	})
+
+	t.Run("both configured", func(t *testing.T) {
+		cert, key, err := Env{TLSCert: "/tls/cert.pem", TLSKey: "/tls/key.pem"}.TLSFiles()
+		require.NoError(t, err)
+		assert.Equal(t, "/tls/cert.pem", cert)
+		assert.Equal(t, "/tls/key.pem", key)
+	})
+
+	t.Run("one alone is an error", func(t *testing.T) {
+		// Silently falling back to plaintext would be a security downgrade
+		// dressed up as a convenience.
+		_, _, err := Env{TLSCert: "/tls/cert.pem"}.TLSFiles()
+		assert.ErrorContains(t, err, EnvTLSKey)
+
+		_, _, err = Env{TLSKey: "/tls/key.pem"}.TLSFiles()
+		assert.ErrorContains(t, err, EnvTLSCert)
+	})
+}
+
+func TestLoadEnvReadsTLSVariables(t *testing.T) {
+	t.Setenv(EnvTLSCert, " /tls/cert.pem ")
+	t.Setenv(EnvTLSKey, "/tls/key.pem")
+
+	env := LoadEnv()
+	assert.Equal(t, "/tls/cert.pem", env.TLSCert)
+	assert.Equal(t, "/tls/key.pem", env.TLSKey)
+}
+
 func TestRateLimitDefaults(t *testing.T) {
 	// Sane defaults: limiting is on unless deliberately turned off, because
 	// the API holds a signing key and every call can move value.

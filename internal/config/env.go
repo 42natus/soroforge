@@ -50,6 +50,13 @@ const (
 	// EnvAPIAddr overrides the HTTP API listen address.
 	EnvAPIAddr = "SOROFORGE_API_ADDR"
 
+	// EnvTLSCert is the path to a PEM certificate for serving the HTTP API
+	// over TLS. It must be set together with EnvTLSKey.
+	EnvTLSCert = "SOROFORGE_TLS_CERT"
+
+	// EnvTLSKey is the path to the PEM private key matching EnvTLSCert.
+	EnvTLSKey = "SOROFORGE_TLS_KEY"
+
 	// EnvAPIRateLimit is the sustained per-client request rate for the HTTP
 	// API, in requests per second. Unset means DefaultAPIRateLimit; 0 disables
 	// limiting (documented, and intended for deployments that limit upstream).
@@ -104,6 +111,9 @@ type Env struct {
 	APIRateBurst  string
 	APITrustProxy string
 
+	TLSCert string
+	TLSKey  string
+
 	// AllowInsecureKeystore accepts a keystore readable by group or others.
 	// See EnvAllowInsecureKeystore.
 	AllowInsecureKeystore bool
@@ -124,6 +134,8 @@ func LoadEnv() Env {
 		APIRateLimit:          strings.TrimSpace(os.Getenv(EnvAPIRateLimit)),
 		APIRateBurst:          strings.TrimSpace(os.Getenv(EnvAPIRateBurst)),
 		APITrustProxy:         strings.TrimSpace(os.Getenv(EnvAPITrustProxy)),
+		TLSCert:               strings.TrimSpace(os.Getenv(EnvTLSCert)),
+		TLSKey:                strings.TrimSpace(os.Getenv(EnvTLSKey)),
 	}
 }
 
@@ -142,6 +154,21 @@ func (e Env) ListenAddr() string {
 		return DefaultAPIAddr
 	}
 	return e.APIAddr
+}
+
+// TLSFiles returns the configured certificate and private key paths, if TLS
+// is configured.
+//
+// Setting exactly one is an error rather than a silent fallback to plaintext:
+// an operator who asked for TLS must not get an unencrypted listener because
+// they forgot the other half of the pair.
+func (e Env) TLSFiles() (certFile, keyFile string, err error) {
+	if (e.TLSCert == "") != (e.TLSKey == "") {
+		return "", "", fmt.Errorf(
+			"TLS needs both a certificate and a key: set both %s and %s "+
+				"(or pass both --tls-cert and --tls-key)", EnvTLSCert, EnvTLSKey)
+	}
+	return e.TLSCert, e.TLSKey, nil
 }
 
 // RateLimitConfig is the resolved per-client rate limit for the HTTP API.
@@ -318,6 +345,8 @@ func (e Env) Redacted() map[string]string {
 		EnvAPIRateLimit:          orDefault(e.APIRateLimit, "(default)"),
 		EnvAPIRateBurst:          orDefault(e.APIRateBurst, "(default)"),
 		EnvAPITrustProxy:         orDefault(e.APITrustProxy, "false"),
+		EnvTLSCert:               e.TLSCert, // a path is not itself a secret
+		EnvTLSKey:                e.TLSKey,
 	}
 }
 
