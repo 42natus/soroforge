@@ -18,6 +18,23 @@ make test
 `make test` requires neither a network nor a database. If it needs either,
 something has regressed — please report it.
 
+### Dev container (optional)
+
+The repository ships a [dev container](.devcontainer/) with Go 1.26, Postgres
+and golangci-lint already wired together. In VS Code, open the folder and
+choose **Reopen in Container**; in GitHub Codespaces, create a codespace.
+Then:
+
+```bash
+make check
+make test-integration
+```
+
+`DATABASE_URL` and `TEST_DATABASE_URL` point at the container's Postgres, so
+the integration suite runs without any other setup. A local Go install and
+Docker compose still work exactly as described below — the dev container is a
+convenience, not a requirement.
+
 For the full suite:
 
 ```bash

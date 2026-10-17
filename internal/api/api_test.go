@@ -10,18 +10,22 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/soroworks/soroforge/internal/api"
 	"github.com/soroworks/soroforge/internal/deploy"
+	"github.com/soroworks/soroforge/internal/readiness"
 	"github.com/soroworks/soroforge/internal/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-const testToken = "test-token-long-enough-to-pass"
+const (
+	testToken         = "test-token-long-enough-to-pass"
+	testReadOnlyToken = "read-only-token-long-enough"
+)
 
 // Rotation tests need two distinct tokens and one that matches neither.
 const (
@@ -104,55 +108,55 @@ func (f *fakeService) History(_ context.Context, network, alias string) ([]store
 	return f.deployments, nil
 }
 
-func newTestRouter(t *testing.T, svc api.Service) http.Handler {
-	t.Helper()
-	router, err := api.NewRouter(api.Options{
-		Service: svc,
-		Token:   testToken,
-		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
-	require.NoError(t, err)
-	return router
+// testTokens matches what the server builds from SOROFORGE_API_TOKEN plus a
+// scoped read-only entry: testToken is read-write, testReadOnlyToken is not.
+func testTokens() []api.Token {
+	return []api.Token{
+		api.NewToken("ci", testToken, false),
+		api.NewToken("dashboard", testReadOnlyToken, true),
+	}
 }
 
-func newTestRouterWithTokens(t *testing.T, svc api.Service, tokens ...string) http.Handler {
-	t.Helper()
-	router, err := api.NewRouter(api.Options{
-		Service: svc,
-		Tokens:  tokens,
-		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
-	require.NoError(t, err)
-	return router
+// healthyReadiness is a Readiness that reports every dependency OK.
+type healthyReadiness struct{}
+
+func (healthyReadiness) Check(context.Context) readiness.Status {
+	return readiness.Status{
+		Ready:        true,
+		Dependencies: []readiness.Dependency{{Name: readiness.DatabaseName, OK: true}},
+	}
 }
 
-func newRateLimitedRouter(t *testing.T, svc api.Service, opts api.RateLimitOptions) http.Handler {
+// fakeReadiness returns a canned verdict, for testing how the handler renders
+// the not-ready case.
+type fakeReadiness struct {
+	status readiness.Status
+}
+
+func (f *fakeReadiness) Check(context.Context) readiness.Status { return f.status }
+
+func newRouter(t *testing.T, svc api.Service, rd api.Readiness, logger *slog.Logger) http.Handler {
 	t.Helper()
 	router, err := api.NewRouter(api.Options{
 		Service:   svc,
-		Token:     testToken,
-		RateLimit: opts,
-		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Tokens:    testTokens(),
+		Readiness: rd,
+		Log:       logger,
 	})
 	require.NoError(t, err)
 	return router
 }
 
-// doFrom issues an authenticated request from a specific client address, so
-// per-client behaviour can be observed.
-func doFrom(t *testing.T, router http.Handler, remoteAddr, xff, path string) *httptest.ResponseRecorder {
+func newTestRouter(t *testing.T, svc api.Service) http.Handler {
 	t.Helper()
+	return newRouter(t, svc, healthyReadiness{},
+		slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug})))
+}
 
-	req := httptest.NewRequest(http.MethodGet, path, nil)
-	req.RemoteAddr = remoteAddr
-	req.Header.Set("Authorization", "Bearer "+testToken)
-	if xff != "" {
-		req.Header.Set("X-Forwarded-For", xff)
-	}
-
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-	return rec
+// newTestRouterWith captures the access log in w.
+func newTestRouterWith(t *testing.T, svc api.Service, rd api.Readiness, w io.Writer) http.Handler {
+	t.Helper()
+	return newRouter(t, svc, rd, slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug})))
 }
 
 // do issues a request with the valid bearer token unless token is overridden.
@@ -188,80 +192,48 @@ func TestServerRefusesToStartWithoutAToken(t *testing.T) {
 	// The API can deploy contracts with a live signing key. Starting it
 	// unauthenticated is the failure this guards against, so it must be
 	// impossible rather than merely discouraged.
-	_, err := api.NewRouter(api.Options{Service: &fakeService{}})
+	_, err := api.NewRouter(api.Options{Service: &fakeService{}, Readiness: healthyReadiness{}})
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "SOROFORGE_API_TOKEN")
+	assert.ErrorContains(t, err, "SOROFORGE_API_TOKENS")
 	assert.ErrorContains(t, err, "will not start unauthenticated")
 }
 
 func TestServerRefusesShortTokens(t *testing.T) {
-	_, err := api.NewRouter(api.Options{Service: &fakeService{}, Token: "short"})
-	assert.ErrorContains(t, err, "at least")
-}
-
-func TestServerRefusesDuplicateTokens(t *testing.T) {
-	// Duplicates are almost certainly a copy-paste slip during rotation, and
-	// accepting them would make "remove one token" ambiguous at audit time.
 	_, err := api.NewRouter(api.Options{
-		Service: &fakeService{},
-		Tokens:  []string{testTokenA, testTokenA},
-	})
-	assert.ErrorContains(t, err, "duplicates")
-	// The message must not print the token itself.
-	assert.NotContains(t, err.Error(), testTokenA)
-}
-
-func TestServerRefusesAWeakTokenInTheList(t *testing.T) {
-	// One strong token does not excuse a weak one: every accepted credential
-	// guards the same signing key.
-	_, err := api.NewRouter(api.Options{
-		Service: &fakeService{},
-		Tokens:  []string{testTokenA, "short"},
+		Service:   &fakeService{},
+		Tokens:    []api.Token{api.NewToken("dashboard", "short", true)},
+		Readiness: healthyReadiness{},
 	})
 	assert.ErrorContains(t, err, "at least")
 }
 
-func TestEveryConfiguredTokenAuthorises(t *testing.T) {
-	// Zero-downtime rotation: during the overlap, both the old and the new
-	// token must work.
-	svc := &fakeService{contracts: []store.Contract{}}
-	router := newTestRouterWithTokens(t, svc, testTokenA, testTokenB)
-
-	for _, token := range []string{testTokenA, testTokenB} {
-		token := token
-		t.Run(token, func(t *testing.T) {
-			rec := do(t, router, http.MethodGet, "/v1/contracts", nil, &token)
-			assert.Equal(t, http.StatusOK, rec.Code)
-		})
-	}
-
-	// A token matching neither is rejected.
-	rec := do(t, router, http.MethodGet, "/v1/contracts", nil, ptr(testTokenC))
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+func TestServerRefusesDuplicateTokenNames(t *testing.T) {
+	_, err := api.NewRouter(api.Options{
+		Service: &fakeService{},
+		Tokens: []api.Token{
+			api.NewToken("ci", testToken, false),
+			api.NewToken("ci", testReadOnlyToken, true),
+		},
+		Readiness: healthyReadiness{},
+	})
+	assert.ErrorContains(t, err, "more than once")
 }
-
-func TestRotationRejectsRemovedToken(t *testing.T) {
-	// The point of rotation: once the old token is removed from config, it
-	// stops working immediately.
-	svc := &fakeService{contracts: []store.Contract{}}
-
-	beforeRemoval := newTestRouterWithTokens(t, svc, testTokenA, testTokenB)
-	assert.Equal(t, http.StatusOK,
-		do(t, beforeRemoval, http.MethodGet, "/v1/contracts", nil, ptr(testTokenB)).Code)
-
-	afterRemoval := newTestRouterWithTokens(t, svc, testTokenB)
-	assert.Equal(t, http.StatusOK,
-		do(t, afterRemoval, http.MethodGet, "/v1/contracts", nil, ptr(testTokenB)).Code)
-	assert.Equal(t, http.StatusUnauthorized,
-		do(t, afterRemoval, http.MethodGet, "/v1/contracts", nil, ptr(testTokenA)).Code)
-}
-
-// ptr returns a pointer to v, for do's optional token argument.
-func ptr(v string) *string { return &v }
 
 func TestNewRouterRequiresService(t *testing.T) {
-	_, err := api.NewRouter(api.Options{Token: testToken})
+	_, err := api.NewRouter(api.Options{
+		Tokens:    []api.Token{api.NewToken("ci", testToken, false)},
+		Readiness: healthyReadiness{},
+	})
 	assert.ErrorContains(t, err, "service is required")
+}
+
+func TestNewRouterRequiresReadiness(t *testing.T) {
+	_, err := api.NewRouter(api.Options{
+		Service: &fakeService{},
+		Tokens:  []api.Token{api.NewToken("ci", testToken, false)},
+	})
+	assert.ErrorContains(t, err, "readiness is required")
 }
 
 func TestHealthNeedsNoToken(t *testing.T) {
@@ -322,6 +294,141 @@ func TestReadEndpointsAlsoRequireAuth(t *testing.T) {
 			assert.Equal(t, http.StatusUnauthorized, rec.Code)
 		})
 	}
+}
+
+func TestReadOnlyTokenCanReadButNotDeploy(t *testing.T) {
+	// A dashboard or monitoring job holds a read-only token. It must be able
+	// to watch, and must be stopped with 403 — not 401 — when it tries to
+	// mutate: the token is valid, the operation simply is not permitted.
+	svc := &fakeService{
+		contracts:     []store.Contract{},
+		deployResult:  &deploy.DeployResult{Alias: "counter"},
+		upgradeResult: &deploy.UpgradeResult{Alias: "counter"},
+	}
+	router := newTestRouter(t, svc)
+	readOnly := testReadOnlyToken
+
+	rec := do(t, router, http.MethodGet, "/v1/contracts", nil, &readOnly)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	for _, path := range []string{"/v1/deploy", "/v1/upgrade"} {
+		t.Run(path, func(t *testing.T) {
+			rec := do(t, router, http.MethodPost, path,
+				map[string]any{"alias": "counter"}, &readOnly)
+
+			assert.Equal(t, http.StatusForbidden, rec.Code)
+			assert.NotEqual(t, http.StatusUnauthorized, rec.Code,
+				"a valid read-only token is authenticated; 401 would send the client hunting for a credential")
+			assert.Contains(t, rec.Body.String(), "read-only")
+			assert.Equal(t, 0, svc.calls, "a forbidden request must never reach the service")
+		})
+	}
+}
+
+func TestReadOnlyTokenReadsEveryReadRoute(t *testing.T) {
+	svc := &fakeService{
+		contracts:     []store.Contract{},
+		deployments:   []store.Deployment{},
+		statusResult:  &deploy.StatusResult{},
+		networkStatus: &deploy.NetworkStatus{},
+	}
+	router := newTestRouter(t, svc)
+	readOnly := testReadOnlyToken
+
+	for _, path := range []string{
+		"/v1/contracts",
+		"/v1/contracts/testnet/counter/history",
+		"/v1/contracts/testnet/counter/status",
+		"/v1/contracts/testnet/status",
+	} {
+		t.Run(path, func(t *testing.T) {
+			rec := do(t, router, http.MethodGet, path, nil, &readOnly)
+			assert.Equal(t, http.StatusOK, rec.Code)
+		})
+	}
+}
+
+func TestReadWriteTokenCanReadAndWrite(t *testing.T) {
+	svc := &fakeService{
+		contracts:    []store.Contract{},
+		deployResult: &deploy.DeployResult{Alias: "counter"},
+	}
+	router := newTestRouter(t, svc)
+
+	rec := do(t, router, http.MethodPost, "/v1/deploy",
+		map[string]any{"alias": "counter"}, nil)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	rec = do(t, router, http.MethodGet, "/v1/contracts", nil, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestReadOnlyTokenIsReportedAsForbiddenNotUnauthorized(t *testing.T) {
+	// The distinction is the point of the feature: dashboards retry a 401,
+	// but a 403 is final and tells the caller to change its token.
+	router := newTestRouter(t, &fakeService{})
+	readOnly := testReadOnlyToken
+
+	rec := do(t, router, http.MethodPost, "/v1/deploy",
+		map[string]any{"alias": "counter"}, &readOnly)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Empty(t, rec.Header().Get("WWW-Authenticate"),
+		"WWW-Authenticate belongs on 401 only; the caller already authenticated")
+}
+
+func TestParseTokens(t *testing.T) {
+	t.Run("legacy token becomes a read-write default", func(t *testing.T) {
+		tokens, err := api.ParseTokens(testToken, "")
+		require.NoError(t, err)
+		require.Len(t, tokens, 1)
+		assert.True(t, tokens[0].Allows(api.ScopeWrite))
+	})
+
+	t.Run("scoped entries carry their scope", func(t *testing.T) {
+		tokens, err := api.ParseTokens("", "dashboard:read:"+testReadOnlyToken+",ci:write:"+testToken)
+		require.NoError(t, err)
+		require.Len(t, tokens, 2)
+
+		assert.True(t, tokens[0].Allows(api.ScopeRead))
+		assert.False(t, tokens[0].Allows(api.ScopeWrite))
+		assert.True(t, tokens[1].Allows(api.ScopeWrite))
+	})
+
+	t.Run("legacy and scoped tokens combine", func(t *testing.T) {
+		tokens, err := api.ParseTokens(testToken, "dashboard:read:"+testReadOnlyToken)
+		require.NoError(t, err)
+		assert.Len(t, tokens, 2)
+	})
+
+	t.Run("a secret may contain colons", func(t *testing.T) {
+		tokens, err := api.ParseTokens("", "dashboard:read:"+testReadOnlyToken+":extra")
+		require.NoError(t, err)
+		require.Len(t, tokens, 1)
+		assert.True(t, tokens[0].Allows(api.ScopeRead))
+	})
+
+	t.Run("malformed entry is an error naming the variable", func(t *testing.T) {
+		_, err := api.ParseTokens("", testToken)
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "SOROFORGE_API_TOKENS")
+		assert.NotContains(t, err.Error(), testToken, "the error must not echo a value that might be a secret")
+	})
+
+	t.Run("unknown scope lists the accepted values", func(t *testing.T) {
+		_, err := api.ParseTokens("", "dashboard:admin:"+testToken)
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "read")
+		assert.ErrorContains(t, err, "write")
+	})
+}
+
+func TestTokenStringRedactsSecret(t *testing.T) {
+	// A Token can end up in a log or an error via %v; its secret must not.
+	token := api.NewToken("dashboard", testReadOnlyToken, true)
+	assert.NotContains(t, token.String(), testReadOnlyToken)
+	assert.Contains(t, token.String(), "dashboard")
+	assert.NotContains(t, fmt.Sprintf("%v", token), testReadOnlyToken)
 }
 
 func TestBearerSchemeIsCaseInsensitive(t *testing.T) {
@@ -405,6 +512,34 @@ func TestDeployRejectsMalformedJSON(t *testing.T) {
 	router.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestMutatingEndpointsRejectOversizedBodies(t *testing.T) {
+	// Both payloads are tiny by design, so a body beyond the cap is refused
+	// with 413 before the service can see it — the alias field carries the
+	// oversized value so the decoder trips on the size limit rather than on
+	// an unknown field.
+	oversized := `{"alias":"` + strings.Repeat("a", 70<<10) + `"}`
+
+	for _, path := range []string{"/v1/deploy", "/v1/upgrade"} {
+		t.Run(path, func(t *testing.T) {
+			svc := &fakeService{}
+			router := newTestRouter(t, svc)
+
+			req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(oversized))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+testToken)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+
+			assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+			assert.Equal(t, 0, svc.calls, "an oversized request must never reach the service")
+
+			var body map[string]string
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			assert.NotEmpty(t, body["error"])
+		})
+	}
 }
 
 func TestUpgradeSucceeds(t *testing.T) {
@@ -584,104 +719,141 @@ func TestStatusAllRequiresAuth(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
-func TestRateLimitTriggersAndResets(t *testing.T) {
-	// 5 requests/second with a burst of 1: the second immediate request is
-	// refused, and the bucket refills within ~200ms.
-	router := newRateLimitedRouter(t, &fakeService{contracts: []store.Contract{}},
-		api.RateLimitOptions{RequestsPerSecond: 5, Burst: 1})
+func TestReadyReportsHealthyDependenciesWithoutAuth(t *testing.T) {
+	// A readiness probe must not require the token that can deploy.
+	router := newTestRouter(t, &fakeService{})
+	empty := ""
 
-	first := do(t, router, http.MethodGet, "/v1/contracts", nil, nil)
-	require.Equal(t, http.StatusOK, first.Code)
+	rec := do(t, router, http.MethodGet, "/ready", nil, &empty)
 
-	second := do(t, router, http.MethodGet, "/v1/contracts", nil, nil)
-	require.Equal(t, http.StatusTooManyRequests, second.Code)
+	require.Equal(t, http.StatusOK, rec.Code)
 
-	// 429 with a Retry-After telling the client how long to wait.
-	retryAfter := second.Header().Get("Retry-After")
-	require.NotEmpty(t, retryAfter)
-	seconds, err := strconv.Atoi(retryAfter)
-	require.NoError(t, err)
-	assert.GreaterOrEqual(t, seconds, 1)
-
-	// Every failure returns the same JSON shape as the rest of the API.
-	var body map[string]string
-	require.NoError(t, json.Unmarshal(second.Body.Bytes(), &body))
-	assert.NotEmpty(t, body["error"])
-	assert.Contains(t, second.Header().Get("Content-Type"), "application/json")
-
-	// The limit resets: one token refills in 200ms.
-	time.Sleep(250 * time.Millisecond)
-
-	third := do(t, router, http.MethodGet, "/v1/contracts", nil, nil)
-	assert.Equal(t, http.StatusOK, third.Code)
+	var body readiness.Status
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.True(t, body.Ready)
+	assert.Contains(t, body.Dependencies, readiness.Dependency{Name: readiness.DatabaseName, OK: true})
 }
 
-func TestHealthIsNeverRateLimited(t *testing.T) {
-	router := newRateLimitedRouter(t, &fakeService{},
-		api.RateLimitOptions{RequestsPerSecond: 1, Burst: 1})
+func TestReadyReturns503AndNamesFailingDependencies(t *testing.T) {
+	rd := &fakeReadiness{status: readiness.Status{
+		Ready: false,
+		Dependencies: []readiness.Dependency{
+			{Name: readiness.DatabaseName, OK: true},
+			{Name: readiness.RPCName("mainnet"), Error: "connection refused"},
+		},
+	}}
+	router := newTestRouterWith(t, &fakeService{}, rd, io.Discard)
+	empty := ""
 
-	// Exhaust the /v1 budget for this client.
-	require.Equal(t, http.StatusOK,
-		do(t, router, http.MethodGet, "/v1/contracts", nil, nil).Code)
-	require.Equal(t, http.StatusTooManyRequests,
-		do(t, router, http.MethodGet, "/v1/contracts", nil, nil).Code)
+	rec := do(t, router, http.MethodGet, "/ready", nil, &empty)
 
-	// /health is a liveness probe: a caller over its limit must still be able
-	// to learn the server is alive.
-	for i := 0; i < 5; i++ {
-		assert.Equal(t, http.StatusOK,
-			do(t, router, http.MethodGet, "/health", nil, nil).Code)
-	}
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Contains(t, rec.Body.String(), readiness.RPCName("mainnet"))
+	assert.Contains(t, rec.Body.String(), "connection refused")
+
+	var body readiness.Status
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.False(t, body.Ready)
 }
 
-func TestRateLimitIsPerClient(t *testing.T) {
-	router := newRateLimitedRouter(t, &fakeService{contracts: []store.Contract{}},
-		api.RateLimitOptions{RequestsPerSecond: 1, Burst: 1})
+func TestReadyReturns503WhenDatabaseIsDown(t *testing.T) {
+	rd := &fakeReadiness{status: readiness.Status{
+		Ready: false,
+		Dependencies: []readiness.Dependency{
+			{Name: readiness.DatabaseName, Error: "dial tcp: connection refused"},
+		},
+	}}
+	router := newTestRouterWith(t, &fakeService{}, rd, io.Discard)
+	empty := ""
 
-	assert.Equal(t, http.StatusOK,
-		doFrom(t, router, "198.51.100.7:1234", "", "/v1/contracts").Code)
+	rec := do(t, router, http.MethodGet, "/ready", nil, &empty)
 
-	// Same address, different source port: still the same client.
-	assert.Equal(t, http.StatusTooManyRequests,
-		doFrom(t, router, "198.51.100.7:5678", "", "/v1/contracts").Code)
-
-	// A different address has its own budget.
-	assert.Equal(t, http.StatusOK,
-		doFrom(t, router, "198.51.100.8:1234", "", "/v1/contracts").Code)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Contains(t, rec.Body.String(), readiness.DatabaseName)
 }
 
-func TestRateLimitReadsForwardedForOnlyWhenTrusted(t *testing.T) {
-	t.Run("untrusted header is ignored", func(t *testing.T) {
-		// Without the opt-in, a client cannot mint itself a fresh bucket by
-		// forging X-Forwarded-For.
-		router := newRateLimitedRouter(t, &fakeService{contracts: []store.Contract{}},
-			api.RateLimitOptions{RequestsPerSecond: 1, Burst: 1})
+func TestAccessLogRecordsOneStructuredLine(t *testing.T) {
+	var buf bytes.Buffer
+	svc := &fakeService{contracts: []store.Contract{}}
+	router := newTestRouterWith(t, svc, healthyReadiness{}, &buf)
 
-		assert.Equal(t, http.StatusOK,
-			doFrom(t, router, "192.0.2.10:4321", "203.0.113.1", "/v1/contracts").Code)
-		assert.Equal(t, http.StatusTooManyRequests,
-			doFrom(t, router, "192.0.2.10:4321", "203.0.113.2", "/v1/contracts").Code)
-	})
+	rec := do(t, router, http.MethodGet, "/v1/contracts", nil, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
 
-	t.Run("trusted header separates clients behind a proxy", func(t *testing.T) {
-		router := newRateLimitedRouter(t, &fakeService{contracts: []store.Contract{}},
-			api.RateLimitOptions{RequestsPerSecond: 1, Burst: 1, TrustProxyHeaders: true})
-
-		assert.Equal(t, http.StatusOK,
-			doFrom(t, router, "192.0.2.10:4321", "203.0.113.1", "/v1/contracts").Code)
-		assert.Equal(t, http.StatusOK,
-			doFrom(t, router, "192.0.2.10:4321", "203.0.113.2", "/v1/contracts").Code)
-		assert.Equal(t, http.StatusTooManyRequests,
-			doFrom(t, router, "192.0.2.10:4321", "203.0.113.1", "/v1/contracts").Code)
-	})
+	entry := lastLogEntry(t, &buf)
+	assert.Equal(t, "http request", entry["msg"])
+	assert.Equal(t, http.MethodGet, entry["method"])
+	assert.Equal(t, "/v1/contracts", entry["route"])
+	assert.Equal(t, float64(http.StatusOK), entry["status"])
+	assert.Contains(t, entry, "duration")
+	assert.NotEmpty(t, entry["request_id"])
+	assert.NotEmpty(t, entry["remote_addr"])
+	// The token is attributed by name; its value is never logged.
+	assert.Equal(t, "ci", entry["token"])
+	assert.NotContains(t, buf.String(), testToken)
 }
 
-func TestRateLimitDisabledByDefaultAtTheRouterLayer(t *testing.T) {
-	// The zero value keeps NewRouter's previous behaviour; serve opts in from
-	// configuration, where the documented defaults live.
-	router := newTestRouter(t, &fakeService{contracts: []store.Contract{}})
+func TestAccessLogUsesTheRoutePatternNotThePath(t *testing.T) {
+	// Log aggregators group by route pattern, so a thousand contract IDs do
+	// not become a thousand log streams.
+	var buf bytes.Buffer
+	svc := &fakeService{statusResult: &deploy.StatusResult{}}
+	router := newTestRouterWith(t, svc, healthyReadiness{}, &buf)
 
-	for i := 0; i < 30; i++ {
-		require.Equal(t, http.StatusOK, do(t, router, http.MethodGet, "/v1/contracts", nil, nil).Code)
-	}
+	rec := do(t, router, http.MethodGet, "/v1/contracts/testnet/counter/status", nil, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	entry := lastLogEntry(t, &buf)
+	assert.Equal(t, "/v1/contracts/{network}/{alias}/status", entry["route"])
+	assert.NotContains(t, entry["route"], "counter")
+}
+
+func TestAccessLogNeverLogsTheTokenOrBody(t *testing.T) {
+	var buf bytes.Buffer
+	svc := &fakeService{deployResult: &deploy.DeployResult{Alias: "counter"}}
+	router := newTestRouterWith(t, svc, healthyReadiness{}, &buf)
+
+	rec := do(t, router, http.MethodPost, "/v1/deploy",
+		map[string]any{"alias": "counter", "notes": "ticket-SECRET-1234"}, nil)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	logs := buf.String()
+	assert.NotContains(t, logs, testToken, "the bearer token must never be logged")
+	assert.NotContains(t, logs, "ticket-SECRET-1234", "the request body must never be logged")
+	assert.Contains(t, logs, `"token":"ci"`, "the token name is the safe attribution")
+}
+
+func TestHealthRequestsAreLoggedAtDebugOnly(t *testing.T) {
+	empty := ""
+
+	infoBuf := &bytes.Buffer{}
+	router := newRouter(t, &fakeService{}, healthyReadiness{},
+		slog.New(slog.NewJSONHandler(infoBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	rec := do(t, router, http.MethodGet, "/health", nil, &empty)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Empty(t, strings.TrimSpace(infoBuf.String()),
+		"a liveness probe polling every second would flood the log")
+
+	debugBuf := &bytes.Buffer{}
+	router = newRouter(t, &fakeService{}, healthyReadiness{},
+		slog.New(slog.NewJSONHandler(debugBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	rec = do(t, router, http.MethodGet, "/health", nil, &empty)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	entry := lastLogEntry(t, debugBuf)
+	assert.Equal(t, "DEBUG", entry["level"])
+	assert.Equal(t, "/health", entry["route"])
+}
+
+// lastLogEntry decodes the final JSON line written to buf.
+func lastLogEntry(t *testing.T, buf *bytes.Buffer) map[string]any {
+	t.Helper()
+
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	require.NotEmpty(t, lines)
+
+	var entry map[string]any
+	require.NoError(t, json.Unmarshal([]byte(lines[len(lines)-1]), &entry),
+		"log line is not JSON: %s", lines[len(lines)-1])
+	return entry
 }

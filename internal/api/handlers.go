@@ -21,11 +21,28 @@ func (h *handlers) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// ready reports whether the dependencies SoroForge needs are usable.
+//
+// Unlike /health, this is allowed to fail: an instance whose database is down
+// cannot record a deploy, and the right response is to take it out of rotation
+// rather than restart it. The check itself lives behind the Readiness
+// interface, so this handler knows only how to render the verdict; it does not
+// import a store or an RPC client.
+func (h *handlers) ready(w http.ResponseWriter, r *http.Request) {
+	status := h.readiness.Check(r.Context())
+
+	code := http.StatusOK
+	if !status.Ready {
+		code = http.StatusServiceUnavailable
+	}
+	writeJSON(w, code, status)
+}
+
 // deploy handles POST /v1/deploy.
 func (h *handlers) deploy(w http.ResponseWriter, r *http.Request) {
 	var req deploy.DeployRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	if err := decodeBody(w, r, &req); err != nil {
+		writeDecodeError(w, err)
 		return
 	}
 	if req.Alias == "" {
@@ -51,8 +68,8 @@ func (h *handlers) deploy(w http.ResponseWriter, r *http.Request) {
 // upgrade handles POST /v1/upgrade.
 func (h *handlers) upgrade(w http.ResponseWriter, r *http.Request) {
 	var req deploy.UpgradeRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	if err := decodeBody(w, r, &req); err != nil {
+		writeDecodeError(w, err)
 		return
 	}
 	if req.Alias == "" {

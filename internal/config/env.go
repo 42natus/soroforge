@@ -31,60 +31,25 @@ const (
 	// up in shell history.
 	EnvKeystorePath = "SOROFORGE_KEYSTORE_PATH"
 
-	// EnvAllowInsecureKeystore disables the keystore permission check. It
-	// exists for environments that mount secrets with modes the operator
-	// cannot change, such as some container secret mounts. Set it to 1 (or
-	// true) deliberately; the default is to refuse.
-	EnvAllowInsecureKeystore = "SOROFORGE_ALLOW_INSECURE_KEYSTORE"
-
-	// EnvAPIToken is the bearer token required by the HTTP API. The server
-	// refuses to start when it is unset.
+	// EnvAPIToken is the original bearer token for the HTTP API. It grants
+	// read and write, so existing single-token deployments keep working. The
+	// server refuses to start when it and EnvAPITokens are both unset.
 	EnvAPIToken = "SOROFORGE_API_TOKEN"
 
-	// EnvAPITokens is a comma-separated list of bearer tokens accepted by the
-	// HTTP API, for zero-downtime rotation: add the new token, move clients
-	// over, then remove the old one. EnvAPIToken is a one-element shorthand
-	// for it, and EnvAPITokens wins when both are set.
+	// EnvAPITokens configures scoped bearer tokens as a comma-separated list
+	// of name:scope:token entries, where scope is "read" or "write" (write
+	// implies read). Read-only tokens can call GET routes and receive 403 on
+	// the mutating ones. Example:
+	//
+	//	SOROFORGE_API_TOKENS="dashboard:read:$DASHBOARD_TOKEN,ci:write:$CI_TOKEN"
 	EnvAPITokens = "SOROFORGE_API_TOKENS"
 
 	// EnvAPIAddr overrides the HTTP API listen address.
 	EnvAPIAddr = "SOROFORGE_API_ADDR"
 
-	// EnvTLSCert is the path to a PEM certificate for serving the HTTP API
-	// over TLS. It must be set together with EnvTLSKey.
-	EnvTLSCert = "SOROFORGE_TLS_CERT"
-
-	// EnvTLSKey is the path to the PEM private key matching EnvTLSCert.
-	EnvTLSKey = "SOROFORGE_TLS_KEY"
-
-	// EnvAPIRateLimit is the sustained per-client request rate for the HTTP
-	// API, in requests per second. Unset means DefaultAPIRateLimit; 0 disables
-	// limiting (documented, and intended for deployments that limit upstream).
-	EnvAPIRateLimit = "SOROFORGE_API_RATE_LIMIT"
-
-	// EnvAPIRateBurst is how many requests a client may make at once before
-	// EnvAPIRateLimit applies. Unset means DefaultAPIRateBurst.
-	EnvAPIRateBurst = "SOROFORGE_API_RATE_BURST"
-
-	// EnvAPITrustProxy makes the rate limiter take the client IP from
-	// X-Forwarded-For. Enable it only when a reverse proxy you control is the
-	// sole way in: the header is otherwise client-controlled, so trusting it
-	// lets a client dodge the limit by forging it, or frame another client by
-	// naming their address.
-	EnvAPITrustProxy = "SOROFORGE_API_TRUST_PROXY"
-)
-
-// Rate limiting defaults. They are generous enough that a well-behaved CI
-// pipeline never notices, but bound what a leaked token or a runaway loop can
-// do: every /v1 call can trigger RPC traffic, and some deploy contracts.
-const (
-	// DefaultAPIRateLimit is the sustained per-client rate in requests per
-	// second, applied when SOROFORGE_API_RATE_LIMIT is unset.
-	DefaultAPIRateLimit = 10.0
-
-	// DefaultAPIRateBurst is the per-client burst, applied when
-	// SOROFORGE_API_RATE_BURST is unset.
-	DefaultAPIRateBurst = 20
+	// EnvLogFormat selects the logging handler: "text" (default) or "json".
+	// JSON is for CI and log aggregators that index structured fields.
+	EnvLogFormat = "SOROFORGE_LOG_FORMAT"
 )
 
 // DefaultAPIAddr is the listen address used when EnvAPIAddr is unset.
@@ -104,19 +69,9 @@ type Env struct {
 	SecretKey    string
 	KeystorePath string
 	APIToken     string
-	APITokens    []string
+	APITokens    string
 	APIAddr      string
-
-	APIRateLimit  string
-	APIRateBurst  string
-	APITrustProxy string
-
-	TLSCert string
-	TLSKey  string
-
-	// AllowInsecureKeystore accepts a keystore readable by group or others.
-	// See EnvAllowInsecureKeystore.
-	AllowInsecureKeystore bool
+	LogFormat    string
 }
 
 // LoadEnv reads SoroForge's environment variables. It does not validate them:
@@ -124,18 +79,13 @@ type Env struct {
 // via RequireDatabaseURL or SigningSeed.
 func LoadEnv() Env {
 	return Env{
-		DatabaseURL:           strings.TrimSpace(os.Getenv(EnvDatabaseURL)),
-		SecretKey:             strings.TrimSpace(os.Getenv(EnvSecretKey)),
-		KeystorePath:          strings.TrimSpace(os.Getenv(EnvKeystorePath)),
-		AllowInsecureKeystore: envBool(os.Getenv(EnvAllowInsecureKeystore)),
-		APIToken:              os.Getenv(EnvAPIToken),
-		APITokens:             splitTokens(os.Getenv(EnvAPITokens)),
-		APIAddr:               strings.TrimSpace(os.Getenv(EnvAPIAddr)),
-		APIRateLimit:          strings.TrimSpace(os.Getenv(EnvAPIRateLimit)),
-		APIRateBurst:          strings.TrimSpace(os.Getenv(EnvAPIRateBurst)),
-		APITrustProxy:         strings.TrimSpace(os.Getenv(EnvAPITrustProxy)),
-		TLSCert:               strings.TrimSpace(os.Getenv(EnvTLSCert)),
-		TLSKey:                strings.TrimSpace(os.Getenv(EnvTLSKey)),
+		DatabaseURL:  strings.TrimSpace(os.Getenv(EnvDatabaseURL)),
+		SecretKey:    strings.TrimSpace(os.Getenv(EnvSecretKey)),
+		KeystorePath: strings.TrimSpace(os.Getenv(EnvKeystorePath)),
+		APIToken:     os.Getenv(EnvAPIToken),
+		APITokens:    strings.TrimSpace(os.Getenv(EnvAPITokens)),
+		APIAddr:      strings.TrimSpace(os.Getenv(EnvAPIAddr)),
+		LogFormat:    strings.ToLower(strings.TrimSpace(os.Getenv(EnvLogFormat))),
 	}
 }
 
@@ -336,23 +286,10 @@ func (e Env) Redacted() map[string]string {
 		EnvDatabaseURL:  redact(e.DatabaseURL),
 		EnvSecretKey:    redact(e.SecretKey),
 		EnvKeystorePath: e.KeystorePath, // a path is not itself a secret
-		// The flag is security-relevant, so diagnostics should show whether
-		// the permission check was explicitly waived.
-		EnvAllowInsecureKeystore: fmt.Sprintf("%t", e.AllowInsecureKeystore),
-		EnvAPIToken:              redact(e.APIToken),
-		EnvAPITokens:             redactList(e.APITokens),
-		EnvAPIAddr:               e.ListenAddr(),
-		EnvAPIRateLimit:          orDefault(e.APIRateLimit, "(default)"),
-		EnvAPIRateBurst:          orDefault(e.APIRateBurst, "(default)"),
-		EnvAPITrustProxy:         orDefault(e.APITrustProxy, "false"),
-		EnvTLSCert:               e.TLSCert, // a path is not itself a secret
-		EnvTLSKey:                e.TLSKey,
-	}
-}
-
-func orDefault(v, fallback string) string {
-	if v == "" {
-		return fallback
+		EnvAPIToken:     redact(e.APIToken),
+		EnvAPITokens:    redact(e.APITokens),
+		EnvAPIAddr:      e.ListenAddr(),
+		EnvLogFormat:    e.LogFormat,
 	}
 	return v
 }

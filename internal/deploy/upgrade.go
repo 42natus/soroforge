@@ -136,22 +136,15 @@ func (s *Service) Upgrade(ctx context.Context, req UpgradeRequest) (*UpgradeResu
 	}
 
 	// Step 1: make the new bytecode available on-chain.
-	uploaded, err := stellar.WasmUploaded(ctx, r.Client, wasmHash)
+	upload, skipped, err := s.uploadBytecode(ctx, r, signer, wasm, req.DryRun, log)
 	if err != nil {
-		return nil, fmt.Errorf("check whether wasm is already uploaded: %w", err)
+		return nil, err
 	}
-	if uploaded {
-		log.Info("wasm already on-chain, skipping upload")
+	if skipped {
 		result.UploadSkipped = true
 	} else {
-		upload, err := s.runTransaction(ctx, r,
-			stellar.UploadWasmOp(wasm, signer.Address()), req.DryRun)
-		if err != nil {
-			return nil, fmt.Errorf("upload wasm: %w", err)
-		}
 		result.UploadTxHash = upload.Hash
 		result.UploadEnvelopeXDR = upload.EnvelopeXDR
-		log.Info("wasm uploaded", "tx_hash", upload.Hash)
 	}
 
 	// Step 2: ask the contract to upgrade itself.
