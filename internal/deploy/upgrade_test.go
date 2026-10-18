@@ -3,6 +3,7 @@ package deploy_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/soroworks/soroforge/internal/deploy"
 	"github.com/soroworks/soroforge/internal/stellar"
@@ -337,4 +338,85 @@ func TestUpgradeToWasmHashMissingOnChain(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "does not exist on-chain")
+}
+
+func TestUpgradeFailsWhenEntrypointDoesNotChangeTheCode(t *testing.T) {
+	// The upgrade transaction confirms, but the contract's entrypoint returned
+	// success without calling update_current_contract_wasm — a bug, or an
+	// upgrade_fn pointing at a function that does something else. Recording
+	// the new hash would create an upgrade that never happened, and status
+	// would later report unexplainable drift.
+	h := newHarness(t, harnessOptions{
+		wasm:        upgradedWasm,
+		upgradeNoop: true,
+		verifyDelay: time.Millisecond,
+	})
+	oldHash := stellar.WasmHash([]byte(testWasm))
+	trackContract(t, h, oldHash)
+
+	ctx := context.Background()
+	_, err := h.svc.Upgrade(ctx, deploy.UpgradeRequest{Alias: "counter"})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "still running wasm")
+	assert.ErrorContains(t, err, "without updating the contract's code")
+	assert.ErrorContains(t, err, "nothing was recorded")
+
+	// Nothing moved in the database: the record still claims the old hash...
+	tracked, err := h.store.GetContract(ctx, "testnet", "counter")
+	require.NoError(t, err)
+	assert.Equal(t, stellar.HashHex(oldHash), tracked.CurrentWasmHash)
+
+	// ...and no history entry describes an upgrade that did not take effect.
+	history, err := h.store.History(ctx, "testnet", "counter")
+	require.NoError(t, err)
+	assert.Empty(t, history)
+}
+
+func TestUpgradeRetriesUntilTheNewHashIsVisible(t *testing.T) {
+	// A node can serve an entry from just before the upgrade transaction's
+	// ledger close, so the first read after confirmation may still report the
+	// old hash. The bounded retry exists to absorb exactly this.
+	h := newHarness(t, harnessOptions{
+		wasm:        upgradedWasm,
+		verifyDelay: time.Millisecond,
+	})
+	oldHash := stellar.WasmHash([]byte(testWasm))
+	trackContract(t, h, oldHash)
+
+	// Capture the stale entry the mock holds before the upgrade effect
+	// replaces it.
+	key, err := stellar.InstanceLedgerKey(h.contractID)
+	require.NoError(t, err)
+	encodedKey, err := xdr.MarshalBase64(key)
+	require.NoError(t, err)
+	staleEntry := h.client.Entries[encodedKey]
+	require.NotEmpty(t, staleEntry)
+
+	// Reads: 1 is the pre-upgrade hash, 2 checks whether the bytecode is
+	// uploaded, 3 is the first verification read. Answer 3 with the stale
+	// entry, and everything after it from the live map.
+	reads := 0
+	h.client.LedgerEntriesFunc = func(_ context.Context, keys []string) ([]stellar.LedgerEntry, error) {
+		reads++
+		var out []stellar.LedgerEntry
+		for _, k := range keys {
+			data, ok := h.client.Entries[k]
+			if reads == 3 && k == encodedKey {
+				data, ok = staleEntry, true
+			}
+			if ok {
+				out = append(out, stellar.LedgerEntry{KeyXDR: k, DataXDR: data, LastModifiedLedger: h.client.LedgerSeq})
+			}
+		}
+		return out, nil
+	}
+
+	result, err := h.svc.Upgrade(context.Background(), deploy.UpgradeRequest{Alias: "counter"})
+	require.NoError(t, err, "the retry must absorb one stale read")
+	assert.Equal(t, stellar.HashHex(h.wasmHash), result.WasmHash)
+
+	history, err := h.store.History(context.Background(), "testnet", "counter")
+	require.NoError(t, err)
+	require.Len(t, history, 1)
+	assert.Equal(t, stellar.HashHex(h.wasmHash), history[0].WasmHash)
 }

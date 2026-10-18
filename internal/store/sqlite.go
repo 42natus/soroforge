@@ -231,12 +231,12 @@ const sqliteRecordDeployment = `
 INSERT INTO deployments (
     alias, network, contract_id, wasm_hash, action, deployer_pubkey,
     tx_hash, ledger, git_commit, dirty, fee_charged, notes,
-    ci_run_url, fn_name, fn_args, created_at
+    ci_run_url, fn_name, fn_args, constructor_args, created_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id, alias, network, contract_id, wasm_hash, action,
           deployer_pubkey, tx_hash, ledger, git_commit, dirty, fee_charged,
-          notes, ci_run_url, fn_name, fn_args, created_at`
+          notes, ci_run_url, fn_name, fn_args, constructor_args, created_at`
 
 // RecordDeployment implements Store.
 func (s *SQLite) RecordDeployment(ctx context.Context, d Deployment) (Deployment, error) {
@@ -247,7 +247,7 @@ func (s *SQLite) RecordDeployment(ctx context.Context, d Deployment) (Deployment
 		d.Alias, d.Network, d.ContractID, d.WasmHash, string(d.Action),
 		d.DeployerPubkey, nullableString(d.TxHash), nullableInt64(int64(d.Ledger)),
 		nullableString(d.GitCommit), nullableDirty(d), nullableFee(d.FeeCharged), nullableString(d.Notes),
-		nullableString(d.CIRunURL), nullableString(d.FnName), nullableString(d.FnArgs),
+		nullableString(d.CIRunURL), nullableString(d.FnName), nullableString(d.FnArgs), nullableString(d.ConstructorArgs),
 		formatSQLiteTime(time.Now().UTC()))
 
 	out, err := scanSQLiteDeployment(row)
@@ -260,7 +260,7 @@ func (s *SQLite) RecordDeployment(ctx context.Context, d Deployment) (Deployment
 const sqliteHistory = `
 SELECT id, alias, network, contract_id, wasm_hash, action,
        deployer_pubkey, tx_hash, ledger, git_commit, dirty, fee_charged,
-       notes, ci_run_url, fn_name, fn_args, created_at
+       notes, ci_run_url, fn_name, fn_args, constructor_args, created_at
 FROM deployments
 WHERE network = ? AND alias = ?
 ORDER BY created_at DESC, id DESC`
@@ -268,7 +268,7 @@ ORDER BY created_at DESC, id DESC`
 const sqliteGetDeployment = `
 SELECT id, alias, network, contract_id, wasm_hash, action,
        deployer_pubkey, tx_hash, ledger, git_commit, dirty, fee_charged,
-       notes, ci_run_url, fn_name, fn_args, created_at
+       notes, ci_run_url, fn_name, fn_args, constructor_args, created_at
 FROM deployments
 WHERE id = ?`
 
@@ -336,7 +336,7 @@ func (s *SQLite) HistoryPage(ctx context.Context, network, alias string, limit, 
 const sqliteListAllDeployments = `
 SELECT id, alias, network, contract_id, wasm_hash, action,
        deployer_pubkey, tx_hash, ledger, git_commit, dirty, fee_charged,
-       notes, ci_run_url, fn_name, fn_args, created_at
+       notes, ci_run_url, fn_name, fn_args, constructor_args, created_at
 FROM deployments
 ORDER BY id`
 
@@ -400,10 +400,11 @@ func scanSQLiteDeployment(s rowScanner) (Deployment, error) {
 		ciRunURL      sql.NullString
 		fnName        sql.NullString
 		fnArgs        sql.NullString
+		ctorArgs      sql.NullString
 	)
 	if err := s.Scan(&d.ID, &d.Alias, &d.Network, &d.ContractID, &d.WasmHash, &action,
 		&d.DeployerPubkey, &txHash, &ledger, &gitCommit, &dirty, &fee,
-		&notes, &ciRunURL, &fnName, &fnArgs, &createdAt); err != nil {
+		&notes, &ciRunURL, &fnName, &fnArgs, &ctorArgs, &createdAt); err != nil {
 		return Deployment{}, err
 	}
 
@@ -416,6 +417,7 @@ func scanSQLiteDeployment(s rowScanner) (Deployment, error) {
 	d.CIRunURL = ciRunURL.String
 	d.FnName = fnName.String
 	d.FnArgs = fnArgs.String
+	d.ConstructorArgs = ctorArgs.String
 	if txHash.Valid {
 		d.TxHash = txHash.String
 	}
@@ -491,12 +493,12 @@ VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		if _, err := tx.ExecContext(ctx, `
 INSERT INTO deployments (id, alias, network, contract_id, wasm_hash, action,
                          deployer_pubkey, tx_hash, ledger, git_commit, dirty, fee_charged,
-                         notes, ci_run_url, fn_name, fn_args, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                         notes, ci_run_url, fn_name, fn_args, constructor_args, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			d.ID, d.Alias, d.Network, d.ContractID, d.WasmHash, string(d.Action),
 			d.DeployerPubkey, nullableString(d.TxHash), nullableInt64(int64(d.Ledger)),
 			nullableString(d.GitCommit), nullableDirty(d), nullableFee(d.FeeCharged), nullableString(d.Notes),
-			nullableString(d.CIRunURL), nullableString(d.FnName), nullableString(d.FnArgs),
+			nullableString(d.CIRunURL), nullableString(d.FnName), nullableString(d.FnArgs), nullableString(d.ConstructorArgs),
 			formatSQLiteTime(d.CreatedAt)); err != nil {
 			return fmt.Errorf("sqlite import deployment %d: %w", d.ID, err)
 		}

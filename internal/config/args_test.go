@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stellar/go-stellar-sdk/keypair"
@@ -484,6 +486,251 @@ func TestArgsToScValsEmpty(t *testing.T) {
 	vals, err := ArgsToScVals(nil)
 	require.NoError(t, err)
 	assert.Empty(t, vals)
+}
+
+func TestParseArgFlag(t *testing.T) {
+	tests := map[string]struct {
+		flag     string
+		wantType xdr.ScValType
+		check    func(t *testing.T, v xdr.ScVal)
+	}{
+		"u32": {
+			flag:     "u32:7",
+			wantType: xdr.ScValTypeScvU32,
+			check:    func(t *testing.T, v xdr.ScVal) { assert.Equal(t, xdr.Uint32(7), *v.U32) },
+		},
+		"string with spaces": {
+			flag:     "string:Example Token",
+			wantType: xdr.ScValTypeScvString,
+			check:    func(t *testing.T, v xdr.ScVal) { assert.Equal(t, xdr.ScString("Example Token"), *v.Str) },
+		},
+		"value containing a colon": {
+			// The first colon splits type from value, so URLs and timestamps
+			// survive.
+			flag:     "string:https://example.org",
+			wantType: xdr.ScValTypeScvString,
+			check:    func(t *testing.T, v xdr.ScVal) { assert.Equal(t, xdr.ScString("https://example.org"), *v.Str) },
+		},
+		"void without a value": {
+			flag:     "void",
+			wantType: xdr.ScValTypeScvVoid,
+		},
+		"bool": {
+			flag:     "bool:true",
+			wantType: xdr.ScValTypeScvBool,
+			check:    func(t *testing.T, v xdr.ScVal) { assert.True(t, *v.B) },
+		},
+		"large integer beyond float precision": {
+			// The shell passes the digits; SoroForge reads them as text, so no
+			// precision is lost on the way in.
+			flag:     `u128:170141183460469231731687303715884105727`,
+			wantType: xdr.ScValTypeScvU128,
+		},
+		"xdr escape hatch": {
+			flag:     "xdr:AAAAAQ==", // base64 ScVal: SCV_VOID
+			wantType: xdr.ScValTypeScvVoid,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			arg, err := ParseArgFlag(tc.flag)
+			require.NoError(t, err)
+
+			val, err := arg.ToScVal()
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantType, val.Type)
+			if tc.check != nil {
+				tc.check(t, val)
+			}
+		})
+	}
+}
+
+func TestParseArgFlagRejectsBadInput(t *testing.T) {
+	tests := map[string]struct {
+		flag    string
+		wantErr string
+	}{
+		"missing type": {
+			flag:    ":7",
+			wantErr: "missing type",
+		},
+		"missing value": {
+			flag:    "u32",
+			wantErr: "missing value",
+		},
+		"unknown type": {
+			flag:    "f64:1",
+			wantErr: "unsupported type",
+		},
+		"invalid value": {
+			flag:    "u32:not a number",
+			wantErr: "not a valid u32",
+		},
+		"nested vec needs the file form": {
+			flag:    "vec:[1]",
+			wantErr: "vec: expected a list of args",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := ParseArgFlag(tc.flag)
+			assert.ErrorContains(t, err, tc.wantErr)
+		})
+	}
+}
+
+func TestParseArgsJSONSupportsNestedForms(t *testing.T) {
+	// The JSON file form is where nested vec and map arguments are used, so it
+	// must accept exactly the shapes soroforge.yaml accepts.
+	args, err := ParseArgsJSON([]byte(`[
+		{"type": "u32", "value": 7},
+		{"type": "string", "value": "SoroForge"},
+		{"type": "vec", "value": [{"type": "bool", "value": true}]},
+		{"type": "map", "value": [
+			{"key": {"type": "symbol", "value": "decimals"},
+			 "value": {"type": "u32", "value": 7}}
+		]}
+	]`))
+	require.NoError(t, err)
+	require.Len(t, args, 4)
+
+	vals, err := ArgsToScVals(args)
+	require.NoError(t, err)
+
+	assert.Equal(t, xdr.Uint32(7), *vals[0].U32)
+	assert.Equal(t, xdr.ScString("SoroForge"), *vals[1].Str)
+
+	require.Equal(t, xdr.ScValTypeScvVec, vals[2].Type)
+	require.NotNil(t, vals[2].Vec)
+	items := **vals[2].Vec
+	require.Len(t, items, 1)
+	assert.True(t, *items[0].B)
+
+	require.Equal(t, xdr.ScValTypeScvMap, vals[3].Type)
+	require.NotNil(t, vals[3].Map)
+	entries := **vals[3].Map
+	require.Len(t, entries, 1)
+	assert.Equal(t, xdr.ScSymbol("decimals"), *entries[0].Key.Sym)
+	assert.Equal(t, xdr.Uint32(7), *entries[0].Val.U32)
+}
+
+func TestParseArgsJSONKeepsLargeIntegersExact(t *testing.T) {
+	// JSON numbers beyond float64's exact range would be rounded before
+	// ToScVal ever saw them if they were decoded as floats.
+	args, err := ParseArgsJSON([]byte(`[{"type": "u64", "value": 18446744073709551615}]`))
+	require.NoError(t, err)
+
+	val, err := args[0].ToScVal()
+	require.NoError(t, err)
+	assert.Equal(t, xdr.Uint64(18446744073709551615), *val.U64)
+}
+
+func TestParseArgsJSONRejectsBadInput(t *testing.T) {
+	tests := map[string]struct {
+		raw     string
+		wantErr string
+	}{
+		"not an array": {
+			raw:     `{"type": "u32", "value": 1}`,
+			wantErr: "cannot unmarshal object",
+		},
+		"malformed json": {
+			raw:     `[`,
+			wantErr: "unexpected EOF",
+		},
+		"unknown field": {
+			raw:     `[{"type": "u32", "value": 1, "typo": true}]`,
+			wantErr: "unknown field",
+		},
+		"invalid value": {
+			raw:     `[{"type": "u32", "value": "not a number"}]`,
+			wantErr: "arg[0]",
+		},
+		"trailing data": {
+			raw:     `[] []`,
+			wantErr: "trailing data",
+		},
+		"empty input": {
+			raw:     ``,
+			wantErr: "EOF",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := ParseArgsJSON([]byte(tc.raw))
+			assert.ErrorContains(t, err, tc.wantErr)
+		})
+	}
+}
+
+func TestParseArgsFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "args.json")
+	require.NoError(t, os.WriteFile(path, []byte(`[{"type": "u32", "value": 7}]`), 0o600))
+
+	args, err := ParseArgsFile(path)
+	require.NoError(t, err)
+	require.Len(t, args, 1)
+	val, err := args[0].ToScVal()
+	require.NoError(t, err)
+	assert.Equal(t, xdr.Uint32(7), *val.U32)
+}
+
+func TestParseArgsFileReportsBadPath(t *testing.T) {
+	_, err := ParseArgsFile(filepath.Join(t.TempDir(), "absent.json"))
+	assert.ErrorContains(t, err, "read args file")
+}
+
+func TestArgsToJSONRoundTrips(t *testing.T) {
+	// What gets recorded with a deployment must parse back into the same
+	// values, including nested forms.
+	original := []Arg{
+		{Type: ArgU32, Value: NewValue("7")},
+		{Type: ArgVec, Value: NewValue([]any{
+			map[string]any{"type": "bool", "value": true},
+		})},
+	}
+	encoded, err := ArgsToJSON(original)
+	require.NoError(t, err)
+	assert.Contains(t, encoded, `"type":"u32"`)
+
+	decoded, err := ParseArgsJSON([]byte(encoded))
+	require.NoError(t, err)
+
+	want, err := ArgsToScVals(original)
+	require.NoError(t, err)
+	got, err := ArgsToScVals(decoded)
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+}
+
+func TestArgsToJSONKeepsArgsFileNumbersNumeric(t *testing.T) {
+	// Recording is what lets a deploy be reproduced later, so an argument
+	// written as a JSON number in an --args-file must be recorded as a number,
+	// exactly as the same value passed with --arg would be.
+	args, err := ParseArgsJSON([]byte(`[
+		{"type": "u32", "value": 9},
+		{"type": "vec", "value": [{"type": "u64", "value": 18446744073709551615}]}
+	]`))
+	require.NoError(t, err)
+
+	encoded, err := ArgsToJSON(args)
+	require.NoError(t, err)
+	assert.JSONEq(t, `[
+		{"type": "u32", "value": 9},
+		{"type": "vec", "value": [{"type": "u64", "value": 18446744073709551615}]}
+	]`, encoded)
+	assert.Contains(t, encoded, `"value":18446744073709551615`,
+		"a u64 beyond float64's exact range must be recorded exactly")
+}
+
+func TestArgsToJSONEmpty(t *testing.T) {
+	encoded, err := ArgsToJSON(nil)
+	require.NoError(t, err)
+	assert.Empty(t, encoded)
 }
 
 func TestParseSalt(t *testing.T) {

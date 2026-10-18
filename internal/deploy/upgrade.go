@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/soroworks/soroforge/internal/stellar"
 	"github.com/soroworks/soroforge/internal/store"
@@ -282,6 +283,31 @@ func (s *Service) Upgrade(ctx context.Context, req UpgradeRequest) (*UpgradeResu
 		return result, nil
 	}
 
+	// The upgrade transaction succeeding only proves the entrypoint ran. A
+	// buggy contract, or a custom upgrade_fn that does something other than
+	// update_current_contract_wasm, can return success without changing the
+	// bytecode. Recording that would create an upgrade that never happened,
+	// and `status` would later report drift with no explanation. The ledger is
+	// the authority on whether the code actually changed.
+	liveAfter, err := s.awaitWasmHash(ctx, r.Client, tracked.ContractID, wasmHash)
+	if err != nil {
+		return nil, fmt.Errorf("verify upgrade of %s on %s: %w",
+			r.Alias, r.NetworkName, err)
+	}
+	if liveAfter != wasmHash {
+		// Nothing is recorded: the provenance rule for this project is that a
+		// history entry exists only when the change is confirmed on-chain.
+		// This transaction confirmed but changed nothing, so there is no
+		// deployment to record. The error identifies the transaction so the
+		// failure is still auditable.
+		return nil, fmt.Errorf(
+			"upgrade of %s on %s: transaction %s confirmed in ledger %d, but the contract is "+
+				"still running wasm %s, not %s; the %q entrypoint returned success without "+
+				"updating the contract's code, so nothing was recorded",
+			r.Alias, r.NetworkName, upgrade.Hash, upgrade.Ledger,
+			stellar.HashHex(liveAfter), wasmHashHex, upgradeFunc)
+	}
+
 	log.Info("contract upgraded",
 		"from_wasm_hash", result.PreviousWasmHash,
 		"to_wasm_hash", wasmHashHex,
@@ -324,4 +350,46 @@ func (s *Service) Upgrade(ctx context.Context, req UpgradeRequest) (*UpgradeResu
 	}, log)
 
 	return result, nil
+}
+
+// awaitWasmHash re-reads a contract's on-chain WASM hash until it reports want
+// or the bounded retry budget is exhausted.
+//
+// The retry exists because the change made by a just-confirmed transaction can
+// take one ledger close to become visible to the RPC node serving the read.
+// Retrying forever would hang on a contract whose upgrade function is a no-op,
+// so the budget is small and fixed. A stale read is not an error: the returned
+// hash simply still differs from want, and the caller explains that.
+func (s *Service) awaitWasmHash(
+	ctx context.Context, client stellar.Client, contractID string, want xdr.Hash,
+) (xdr.Hash, error) {
+	var (
+		last    xdr.Hash
+		lastErr error
+	)
+	for attempt := 1; attempt <= s.verifyAttempts; attempt++ {
+		if attempt > 1 {
+			select {
+			case <-ctx.Done():
+				return last, ctx.Err()
+			case <-time.After(s.verifyDelay):
+			}
+		}
+		hash, err := stellar.OnChainWasmHash(ctx, client, contractID)
+		if err != nil {
+			// A transient RPC error is worth retrying too; the last error is
+			// reported if no read ever succeeds.
+			lastErr = err
+			continue
+		}
+		lastErr = nil
+		last = hash
+		if hash == want {
+			return hash, nil
+		}
+	}
+	if lastErr != nil {
+		return last, lastErr
+	}
+	return last, nil
 }

@@ -137,7 +137,8 @@ type Contract struct {
 	Wasm string `yaml:"wasm"`
 
 	// ConstructorArgs are passed to the contract's constructor at
-	// instantiation. Empty is valid and common.
+	// instantiation. Empty is valid and common. A network override may
+	// replace them for one network.
 	ConstructorArgs []Arg `yaml:"constructor_args"`
 
 	// InitFunc is the contract entrypoint invoked immediately after
@@ -153,8 +154,53 @@ type Contract struct {
 
 	// Salt is an optional 32-byte hex value that makes the derived contract ID
 	// deterministic. When empty a random salt is generated per deploy, so
-	// deploying the same alias twice yields two distinct contracts.
+	// deploying the same alias twice yields two distinct contracts. A network
+	// override may replace it for one network.
 	Salt string `yaml:"salt"`
+
+	// Networks holds per-network overrides for settings that legitimately
+	// differ between environments — a different admin address in the
+	// constructor, a different token name, or a different salt. Keys must name
+	// networks declared in Networks. An override takes precedence over the
+	// contract's defaults; see ForNetwork for the resolution order.
+	Networks map[string]ContractOverride `yaml:"networks"`
+}
+
+// ContractOverride customises a contract for one network.
+//
+// Only the settings that realistically differ per environment are overridable.
+// `wasm` is not: the same build is deployed everywhere, and `upgrade_fn` is a
+// property of the contract, not of the network it runs on.
+type ContractOverride struct {
+	// ConstructorArgs replaces the contract's constructor_args when deploying
+	// to this network. An explicit empty list is a real override: it deploys
+	// with no constructor arguments, clearing the contract's defaults.
+	ConstructorArgs []Arg `yaml:"constructor_args"`
+
+	// Salt replaces the contract's salt when deploying to this network. An
+	// empty salt means "inherit the contract's salt", since a random salt is
+	// already the default and there is nothing to clear.
+	Salt string `yaml:"salt"`
+}
+
+// ForNetwork returns the contract with the named network's overrides applied
+// on top of the contract's defaults.
+//
+// This is the single resolution point for per-network settings. Deploy, dry
+// run, and any preview call it through Service.resolve, so they cannot
+// disagree about which arguments or salt apply.
+func (c Contract) ForNetwork(network string) Contract {
+	override, ok := c.Networks[network]
+	if !ok {
+		return c
+	}
+	if override.ConstructorArgs != nil {
+		c.ConstructorArgs = override.ConstructorArgs
+	}
+	if override.Salt != "" {
+		c.Salt = override.Salt
+	}
+	return c
 }
 
 // UpgradeFuncOrDefault returns the configured upgrade entrypoint, falling back

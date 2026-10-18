@@ -1,9 +1,12 @@
 package config
 
 import (
+	"bytes"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math/big"
+	"os"
 	"strconv"
 	"strings"
 
@@ -12,7 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Arg is a contract argument written in soroforge.yaml.
+// Arg is a contract argument written in soroforge.yaml or an --args-file.
 //
 // Soroban takes arguments as XDR ScVal values, which are not something anyone
 // wants to hand-write. An Arg is the readable form:
@@ -33,8 +36,8 @@ import (
 // To add a type, extend the switch in ToScVal and add a case to the table test
 // in args_test.go. Nothing else needs to change.
 type Arg struct {
-	Type  string `yaml:"type"`
-	Value Value  `yaml:"value"`
+	Type  string `yaml:"type" json:"type"`
+	Value Value  `yaml:"value" json:"value"`
 }
 
 // Supported Arg type names.
@@ -69,8 +72,8 @@ var SupportedArgTypes = []string{
 
 // MapEntry is one key/value pair of a `map` argument.
 type MapEntry struct {
-	Key   Arg `yaml:"key"`
-	Value Arg `yaml:"value"`
+	Key   Arg `yaml:"key" json:"key"`
+	Value Arg `yaml:"value" json:"value"`
 }
 
 // ToScVal converts the argument to its XDR representation.
@@ -277,6 +280,120 @@ func ArgsToScVals(args []Arg) ([]xdr.ScVal, error) {
 		out = append(out, val)
 	}
 	return out, nil
+}
+
+// ParseArgFlag parses the TYPE:VALUE form used by `deploy --arg`, such as
+// "u32:7" or "string:Example Token". It returns the same Arg the config file
+// uses, so validation is identical to a config-file argument.
+//
+// The colon is a separator, so a value containing one is fine as long as it
+// comes after the type: "string:https://example.org" works. Nested vec and map
+// values cannot be expressed here; use --args-file for those.
+func ParseArgFlag(s string) (Arg, error) {
+	name, raw, found := strings.Cut(s, ":")
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return Arg{}, fmt.Errorf("missing type in %q: expected TYPE:VALUE (supported: %s)",
+			s, strings.Join(SupportedArgTypes, ", "))
+	}
+
+	arg := Arg{Type: name}
+	switch {
+	case found:
+		arg.Value = NewValue(strings.TrimSpace(raw))
+	case strings.EqualFold(name, ArgVoid):
+		// void is the one type that takes no value.
+	default:
+		return Arg{}, fmt.Errorf("missing value in %q: expected TYPE:VALUE (supported: %s)",
+			s, strings.Join(SupportedArgTypes, ", "))
+	}
+
+	// Fail here rather than at deploy time, so a bad flag is rejected before
+	// any transaction is built.
+	if _, err := arg.ToScVal(); err != nil {
+		return Arg{}, err
+	}
+	tagScalarValue(&arg)
+	return arg, nil
+}
+
+// tagScalarValue re-tags a flag-parsed scalar with the YAML type its Arg
+// declares. A flag value always arrives as text; tagging numbers and booleans
+// as such keeps the recorded constructor_args JSON in the same shape a config
+// file would produce, instead of recording everything as a string.
+func tagScalarValue(arg *Arg) {
+	if !arg.Value.set || arg.Value.node.Kind != yaml.ScalarNode {
+		return
+	}
+
+	switch strings.ToLower(strings.TrimSpace(arg.Type)) {
+	case ArgBool:
+		b, err := arg.Value.asBool()
+		if err != nil {
+			return // unreachable: ToScVal validated the value
+		}
+		arg.Value.node.Tag = "!!bool"
+		arg.Value.node.Value = strconv.FormatBool(b)
+	case ArgU32, ArgI32, ArgU64, ArgI64, ArgU128, ArgI128:
+		// A leading + is valid YAML but not JSON; drop it.
+		arg.Value.node.Tag = "!!int"
+		arg.Value.node.Value = strings.TrimPrefix(strings.TrimSpace(arg.Value.node.Value), "+")
+	}
+}
+
+// ParseArgsJSON decodes a JSON array of typed arguments, the `--args-file`
+// form. Each entry uses the same {type, value} shape as soroforge.yaml, so
+// nested vec and map arguments are supported.
+func ParseArgsJSON(raw []byte) ([]Arg, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+
+	var args []Arg
+	if err := dec.Decode(&args); err != nil {
+		return nil, err
+	}
+	if dec.More() {
+		return nil, fmt.Errorf("unexpected trailing data after the argument array")
+	}
+
+	// Validate eagerly so `--args-file` reports the offending entry by index
+	// before a command begins.
+	for i, arg := range args {
+		if _, err := arg.ToScVal(); err != nil {
+			return nil, fmt.Errorf("arg[%d]: %w", i, err)
+		}
+	}
+	return args, nil
+}
+
+// ParseArgsFile reads a JSON file holding an array of typed arguments, the
+// file form of `deploy --arg`. The path is resolved against the process's
+// working directory, not the config file, because the user named it on the
+// command line.
+func ParseArgsFile(path string) ([]Arg, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read args file %s: %w", path, err)
+	}
+	args, err := ParseArgsJSON(raw)
+	if err != nil {
+		return nil, fmt.Errorf("parse args file %s: %w", path, err)
+	}
+	return args, nil
+}
+
+// ArgsToJSON renders typed arguments as JSON, the form recorded with a
+// deployment so the arguments actually used can be recovered later. An empty
+// list records nothing, since there is nothing to recover.
+func ArgsToJSON(args []Arg) (string, error) {
+	if len(args) == 0 {
+		return "", nil
+	}
+	encoded, err := json.Marshal(args)
+	if err != nil {
+		return "", fmt.Errorf("encode args: %w", err)
+	}
+	return string(encoded), nil
 }
 
 // ParseAddress converts a Stellar account (G...) or contract (C...) strkey into

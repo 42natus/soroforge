@@ -30,6 +30,9 @@ func newDeployCmd() *cobra.Command {
 		notes       string
 		gitCommit   string
 		requireSpec bool
+		all         bool
+		argFlags    []string
+		argsFile    string
 		progress    bool
 	)
 
@@ -51,10 +54,24 @@ A WASM without a contractspecv0 section still deploys, but warns that SoroVault
 cannot catalogue it and clients cannot be generated for it. --require-spec turns
 that warning into an error.
 
+Constructor arguments come from soroforge.yaml unless overridden here for one
+deploy: --arg TYPE:VALUE (repeatable) replaces them, or --args-file points at
+a JSON array of the same typed arguments. The two are mutually exclusive.
+
+With --all, every contract in soroforge.yaml that is not yet tracked on the
+network is deployed, in alias order; already-tracked contracts are skipped.
+The first failure stops the run and the summary reports what was done before
+it. --dry-run works with --all.
+
 Progress is written to stderr while waiting for confirmation, and only when
 stderr is a terminal, so stdout and --json stay clean. Use --progress to force
 it on in a pipe or log.`,
-		Args: cobra.ExactArgs(1),
+		Args: func(cmd *cobra.Command, args []string) error {
+			if all {
+				return cobra.NoArgs(cmd, args)
+			}
+			return cobra.ExactArgs(1)(cmd, args)
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// A dry run writes nothing, so it does not need a database — that
 			// makes it usable as a config check in a fresh checkout.
@@ -68,14 +85,55 @@ it on in a pipe or log.`,
 			}
 			defer a.Close()
 
-			result, err := a.service.Deploy(cmd.Context(), deploy.DeployRequest{
+			if all {
+				if cmd.Flags().Changed("arg") || cmd.Flags().Changed("args-file") {
+					return fmt.Errorf(
+						"--arg and --args-file are per-contract and cannot be combined with --all")
+				}
+				results, runErr := a.service.DeployAll(cmd.Context(), deploy.DeployAllRequest{
+					Network: flags.network,
+					Notes:   notes,
+					DryRun:  dryRun,
+				})
+				if results != nil {
+					if err := printDeployAll(results); err != nil {
+						return err
+					}
+				}
+				return runErr
+			}
+
+			request := deploy.DeployRequest{
 				Alias:       args[0],
 				Network:     flags.network,
 				Notes:       notes,
 				DryRun:      dryRun,
 				GitCommit:   gitCommit,
 				RequireSpec: requireSpec,
-			})
+			}
+
+			switch {
+			case cmd.Flags().Changed("arg") && cmd.Flags().Changed("args-file"):
+				return fmt.Errorf("--arg and --args-file are mutually exclusive; use one or the other")
+			case cmd.Flags().Changed("args-file"):
+				parsed, err := config.ParseArgsFile(argsFile)
+				if err != nil {
+					return err
+				}
+				request.ConstructorArgs = parsed
+			case cmd.Flags().Changed("arg"):
+				parsed := make([]config.Arg, 0, len(argFlags))
+				for _, raw := range argFlags {
+					arg, err := config.ParseArgFlag(raw)
+					if err != nil {
+						return fmt.Errorf("--arg %s: %w", raw, err)
+					}
+					parsed = append(parsed, arg)
+				}
+				request.ConstructorArgs = parsed
+			}
+
+			result, err := a.service.Deploy(cmd.Context(), request)
 			if err != nil {
 				return err
 			}
@@ -87,6 +145,12 @@ it on in a pipe or log.`,
 		"assemble and simulate without submitting or recording anything")
 	cmd.Flags().StringVar(&notes, "notes", "",
 		"free-form note recorded with this deployment (e.g. a ticket or release tag)")
+	cmd.Flags().BoolVar(&all, "all", false,
+		"deploy every configured contract that is not yet tracked on the network")
+	cmd.Flags().StringArrayVar(&argFlags, "arg", nil,
+		"constructor argument as TYPE:VALUE (repeatable); replaces the config's constructor_args")
+	cmd.Flags().StringVar(&argsFile, "args-file", "",
+		"JSON file with an array of {type, value} constructor arguments; replaces the config's")
 	cmd.Flags().BoolVar(&progress, "progress", false,
 		"show progress on stderr even when stderr is not a terminal")
 	attachAliasCompletion(cmd)
