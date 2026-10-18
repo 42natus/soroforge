@@ -51,6 +51,20 @@ type Client interface {
 	LatestLedger(ctx context.Context) (uint32, error)
 }
 
+// NetworkReporter is implemented by clients whose endpoint can report which
+// Stellar network it actually serves. `soroforge networks` uses it to verify
+// that a configured network's passphrase matches what the endpoint answers,
+// so a misspelled rpc_url cannot silently point a deploy at the wrong chain.
+//
+// It is a separate interface rather than a method on Client because the
+// check is optional: an endpoint that does not implement getNetwork still
+// answers every operation Client requires.
+type NetworkReporter interface {
+	// ReportNetworkPassphrase returns the network passphrase the endpoint
+	// reports serving, via the RPC's getNetwork method.
+	ReportNetworkPassphrase(ctx context.Context) (string, error)
+}
+
 // Signer produces signatures for assembled transactions.
 //
 // Implementations hold key material and must never log, serialise, or otherwise

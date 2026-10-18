@@ -196,6 +196,51 @@ func (m *MemoryStore) History(ctx context.Context, network, alias string) ([]Dep
 	return out, nil
 }
 
+// ListAllDeployments implements Store. Returned in id order, matching the
+// Postgres and SQLite ORDER BY, so exports are byte-identical across backends.
+func (m *MemoryStore) ListAllDeployments(ctx context.Context) ([]Deployment, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	out := make([]Deployment, len(m.deployments))
+	copy(out, m.deployments)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
+// importSnapshot implements snapshotImporter: inserts records verbatim,
+// preserving the ids and timestamps an import carries rather than re-stamping
+// them, and advances the id counter past everything imported so subsequent
+// RecordDeployment calls cannot collide.
+func (m *MemoryStore) importSnapshot(ctx context.Context, contracts []Contract, deployments []Deployment) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	next := m.nextID
+	for _, c := range contracts {
+		m.contracts[contractKey(c.Network, c.Alias)] = c
+		if c.ID >= next {
+			next = c.ID + 1
+		}
+	}
+	for _, d := range deployments {
+		m.deployments = append(m.deployments, d)
+		if d.ID >= next {
+			next = d.ID + 1
+		}
+	}
+	m.nextID = next
+	return nil
+}
+
 // HistoryPage implements Store.
 func (m *MemoryStore) HistoryPage(ctx context.Context, network, alias string, limit, offset int) ([]Deployment, error) {
 	if err := validatePage(limit, offset); err != nil {

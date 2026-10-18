@@ -32,9 +32,9 @@ memory. A week later, nobody can answer:
 - Has anyone changed it since?
 
 The answers live in someone's shell history, if they live anywhere. SoroForge
-records every deploy and upgrade in Postgres — contract ID, WASM hash, network,
-deployer address, transaction, ledger, and free-form notes — and can verify that
-record against the chain on demand.
+records every deploy and upgrade in a database — Postgres or a SQLite file —
+contract ID, WASM hash, network, deployer address, transaction, ledger, and
+free-form notes — and can verify that record against the chain on demand.
 
 That last part matters most. A deployment tracker that never checks itself will
 confidently report stale information. `soroforge status` compares the WASM hash
@@ -69,8 +69,9 @@ Two details that trip up code written from older examples:
   to the operation, and rebuilds the transaction so that `txnbuild` recomputes
   the fee as `BaseFee × operations + ResourceFee`.
 
-Other pinned dependencies: `pgx/v5 v5.10.0`, `golang-migrate/v4 v4.19.1`,
-`cobra v1.10.2`, `chi/v5 v5.3.1`, `testify v1.11.1`, `yaml.v3 v3.0.1`.
+Other pinned dependencies: `pgx/v5 v5.11.0`, `golang-migrate/v4 v4.20.1`,
+`cobra v1.10.2`, `chi/v5 v5.3.2`, `testify v1.12.1`, `yaml.v3 v3.0.1`,
+`modernc.org/sqlite v1.60.1` (pure Go, no CGO).
 
 ---
 
@@ -104,8 +105,10 @@ configurable per contract via `upgrade_fn`.
 
 ## Quickstart — deploy to testnet
 
-**Prerequisites:** Go 1.25+, Docker (for Postgres), a compiled contract `.wasm`,
-and a funded testnet account.
+**Prerequisites:** Go 1.26+ (required by `modernc.org/sqlite`, the SQLite
+backend's pure-Go driver), a compiled contract `.wasm`, and a funded testnet
+account. Postgres via Docker is one storage option; a SQLite file needs neither
+(see [Storage backends](#storage-backends-postgres-and-sqlite)).
 
 ```bash
 git clone https://github.com/soroworks/soroforge.git
@@ -113,11 +116,17 @@ cd soroforge
 make build
 ```
 
-**1. Start Postgres and create the schema.**
+**1. Create the schema.** With Postgres:
 
 ```bash
 docker compose up -d
 make migrate-up
+```
+
+With SQLite — no server, no Docker:
+
+```bash
+DATABASE_URL="sqlite:///soroforge.db" ./bin/soroforge migrate up
 ```
 
 **2. Configure your project.** From your contract project, after
@@ -284,7 +293,7 @@ contracts:
 
 | Variable | Purpose |
 |---|---|
-| `DATABASE_URL` | Postgres connection string. Required except for `deploy --dry-run`. |
+| `DATABASE_URL` | History database: `postgres://...` or `sqlite:///path/to/file.db`. Required except for `deploy --dry-run`. |
 | `SOROFORGE_SECRET_KEY` | Deployer secret seed (`S...`). |
 | `SOROFORGE_KEYSTORE_PATH` | Path to a file containing only the seed. |
 | `SOROFORGE_ALLOW_INSECURE_KEYSTORE` | Set to `1` to allow keystore files readable by group or others. |
@@ -321,6 +330,15 @@ soroforge deploy counter --log-format json
 An unknown format is rejected with the accepted values rather than silently
 falling back.
 
+**Shell completion.** Generate a script with `soroforge completion
+bash|zsh|fish|powershell`. Contract aliases tab-complete for `deploy`,
+`upgrade`, `upload`, `history`, and `status`, and `--network` tab-completes the
+configured network names — all sourced live from `soroforge.yaml`, using the
+same path rules (`--config`, then `$SOROFORGE_CONFIG`, then `./soroforge.yaml`)
+as every other command. Completion never calls an RPC endpoint and never opens
+the database; a missing or invalid config simply yields no suggestions instead
+of an error printed mid-prompt.
+
 | Command | Description |
 |---|---|
 | `init` | Write a starter `soroforge.yaml` for the contracts built under `target/`. |
@@ -329,8 +347,11 @@ falling back.
 | `upload <alias>` | Install WASM on-chain without deploying or upgrading; prints the hash for a governance proposal. |
 | `list` | List tracked contracts; `--network` filters. |
 | `history <alias>` | Show a contract's full deploy/upgrade timeline, newest first. |
+| `history export` | Write every tracked contract and deployment as versioned JSON (`--out FILE`, else stdout). |
+| `history import <file>` | Load an export into an empty database; `--merge` imports into a populated one. |
 | `status <alias>` | Compare the on-chain WASM hash against the recorded one. |
 | `status --all` | Drift-check every tracked contract on the network, for a single CI gate. |
+| `networks` | Health-check every configured RPC endpoint: responds? latency, latest ledger, passphrase match. |
 | `serve` | Run the HTTP API. |
 | `migrate up\|down\|version` | Manage the schema. |
 | `version` | Print the SoroForge version. |
@@ -360,6 +381,37 @@ The four states it reports:
   Someone changed it another way.
 - **`untracked`** — SoroForge has no record of this contract on this network.
 - **`missing`** — SoroForge has a record, but the chain has no such contract.
+
+**`networks` exit codes** make it usable as a CI preflight gate. Every
+configured network is probed concurrently, each under `--timeout` (default 5s):
+
+| Code | Meaning |
+|---|---|
+| `0` | Every endpoint answered and reported the configured passphrase. |
+| `1` | At least one endpoint is unreachable, too slow, or serves a different network. |
+
+The report prints each network's latency, latest ledger, and a passphrase
+verdict (`match`, `MISMATCH`, or `not verified`). The RPC URL is printed with
+any userinfo and query-string credentials removed — provider keys commonly live
+in the URL — so the output, including `--json`, is safe to paste into a ticket
+or CI log.
+
+**`history export` / `history import`** move the entire recorded history
+between databases as a versioned JSON document (`version: 1`; the format is
+documented in [`internal/store/history.go`](internal/store/history.go)).
+Original ids and timestamps are carried through untouched — a re-imported
+history reads like the original, not like it was all written on import day.
+Import refuses a non-empty database unless `--merge`, which adds what is
+missing and skips records that exactly duplicate what is stored; same id with
+different content is always an error. The document contains every contract and
+deployment in the database, including aliases that have since left
+`soroforge.yaml` — the history outlives the config.
+
+```bash
+soroforge history export --out history.json   # or pipe stdout
+soroforge history import history.json         # empty database
+soroforge history import history.json --merge # existing records kept, duplicates skipped
+```
 
 ---
 
@@ -455,6 +507,41 @@ does not flood the log.
 
 ---
 
+## Storage backends: Postgres and SQLite
+
+SoroForge records history in whichever database `DATABASE_URL` names. Both
+implement the same `store.Store` interface and pass the same conformance suite,
+so command behaviour and the HTTP API are identical across them — only the
+storage characteristics differ.
+
+| | Postgres | SQLite |
+|---|---|---|
+| URL form | `postgres://user:pass@host/db` | `sqlite:///soroforge.db` (absolute or project-relative file path) |
+| Setup | Server or `docker compose up -d` | None; a file |
+| Driver | `pgx/v5` | `modernc.org/sqlite` (pure Go; `CGO_ENABLED=0` builds keep working) |
+| Best for | Teams, multiple machines, concurrent writers, `serve` with real traffic | Solo use, CI, the laptop, anything where "just a file" beats a server |
+| Migrations | `internal/store/migrations/postgres/` | `internal/store/migrations/sqlite/` |
+
+`sqlite://` URLs select the SQLite store; anything else is Postgres. Migrations
+are dialect-aware (`soroforge migrate up` reads the scheme the same way), and
+both directories are embedded in the binary. A parity test
+(`TestMigrationDialectsStayInParity`) fails if the two dialects' table, column,
+or index sets ever diverge, because a schema that drifts between backends means
+an export→import round trip that silently loses data.
+
+**When to choose which:** use SQLite when you are one developer or one CI job —
+it removes the Docker prerequisite entirely (`go test ./...` already runs the
+SQLite suite with no external dependency). Use Postgres when multiple people or
+machines need to see the same history, when you run `serve` for a team, or when
+you want managed backups. A single SQLite file is local: writes serialise, so
+two concurrent `soroforge` processes on one file contend (the driver's busy
+timeout absorbs short bursts, but it is not a shared database).
+
+To move history between backends, use `soroforge history export` on one and
+`soroforge history import` on the other — ids and timestamps carry through.
+
+---
+
 ## Security notes on key handling
 
 **SoroForge reads a key you provide. It does not generate, store, rotate, or
@@ -518,16 +605,17 @@ cmd/soroforge/      cobra CLI
 internal/config/    soroforge.yaml + env loading, validation, ScVal encoding
 internal/stellar/   RPC client, transaction assembly, signing (all interfaced)
 internal/deploy/    deploy/upgrade/status orchestration
-internal/store/     Postgres history + embedded migrations
+internal/store/     history: Postgres, SQLite, in-memory + embedded migrations
+internal/netcheck/  concurrent RPC health probes behind `soroforge networks`
 internal/api/       chi HTTP handlers mirroring the CLI
 internal/readiness/ database + per-network RPC probes behind GET /ready
 internal/catalog/   best-effort registration with SoroVault after a deploy
 ```
 
 Three interfaces are the seams: `stellar.Client` (RPC), `stellar.Signer`
-(signing), and `store.Store` (persistence). Each has a production implementation
-and an in-memory one, which is why `go test ./...` needs neither a network nor a
-database.
+(signing), and `store.Store` (persistence). `store.Store` has two production
+implementations — Postgres and SQLite — plus an in-memory one, which is why
+`go test ./...` needs neither a network nor a database.
 
 `stellar.Client` deliberately speaks base64 XDR strings rather than SDK structs,
 so a fake needs no XDR plumbing. Everything that interprets XDR — building
@@ -556,9 +644,11 @@ make test-live          # read-only smoke tests against live testnet
 ```
 
 `go test ./...` never requires a network or a database — the Postgres and live
-tests skip unless their environment variable is set. The Postgres suite runs the
-*same* test suite as the in-memory store, which keeps the fake honest about
-matching real database semantics.
+tests skip unless their environment variable is set. The SQLite store is pure
+Go, so its full conformance suite runs as part of the default test command with
+no setup at all. The Postgres suite runs the *same* test suite as the in-memory
+store (and SQLite, and the history import/export suite), which keeps the fakes
+honest about matching real database semantics.
 
 The live tests are read-only (no keys, no submissions, no fees). They exist
 because the rest of the suite proves SoroForge is internally consistent, not

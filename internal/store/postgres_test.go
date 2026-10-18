@@ -72,6 +72,12 @@ func TestPostgresStore(t *testing.T) {
 	runStoreSuite(t, newPostgresStore)
 }
 
+func TestPostgresHistory(t *testing.T) {
+	// Export/import losslessness must hold against the production backend
+	// too, not just the in-memory and SQLite ones.
+	runHistorySuite(t, newPostgresStore)
+}
+
 func TestPostgresMigrationsAreReversible(t *testing.T) {
 	url := testDatabaseURL(t)
 

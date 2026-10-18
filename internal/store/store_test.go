@@ -287,6 +287,41 @@ func runStoreSuite(t *testing.T, newStore func(t *testing.T) store.Store) {
 		assert.Equal(t, uint32(300), history[0].Ledger)
 	})
 
+	t.Run("list all deployments returns everything in id order", func(t *testing.T) {
+		// `history export` walks this query, so it must reach deployments
+		// whose (network, alias) has no live contract anymore — an alias
+		// removed from soroforge.yaml still owns its history.
+		s := newStore(t)
+
+		_, err := s.RecordDeployment(ctx, store.Deployment{
+			Alias: "old", Network: "testnet", ContractID: "C1", WasmHash: "a",
+			Action: store.ActionDeploy, DeployerPubkey: "GABC",
+		})
+		require.NoError(t, err)
+		_, err = s.RecordDeployment(ctx, store.Deployment{
+			Alias: "counter", Network: "mainnet", WasmHash: "b",
+			Action: store.ActionUpload, DeployerPubkey: "GXYZ",
+		})
+		require.NoError(t, err)
+
+		all, err := s.ListAllDeployments(ctx)
+		require.NoError(t, err)
+		require.Len(t, all, 2)
+		assert.Less(t, all[0].ID, all[1].ID, "export order is insertion order, stable across backends")
+		assert.Equal(t, "old", all[0].Alias)
+		assert.Equal(t, store.ActionUpload, all[1].Action)
+		assert.Empty(t, all[1].ContractID, "uploads have no contract id and must still export")
+	})
+
+	t.Run("list all deployments of an empty store is empty, not nil", func(t *testing.T) {
+		s := newStore(t)
+
+		all, err := s.ListAllDeployments(ctx)
+		require.NoError(t, err)
+		assert.NotNil(t, all)
+		assert.Empty(t, all)
+	})
+
 	t.Run("fee and source metadata survive a round trip", func(t *testing.T) {
 		s := newStore(t)
 		fee := int64(123456)

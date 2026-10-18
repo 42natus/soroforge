@@ -4,6 +4,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
@@ -11,14 +12,33 @@ import (
 	// Registers the postgres driver that NewWithSourceInstance resolves from
 	// the postgres:// scheme in DATABASE_URL.
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
+
+	// Registers the sqlite driver resolved from the sqlite:// scheme. It is
+	// built on modernc.org/sqlite, the pure-Go driver, so CGO stays off.
+	_ "github.com/golang-migrate/migrate/v4/database/sqlite"
 )
 
-// migrationsFS embeds the schema so a built binary carries its own migrations.
-// `soroforge migrate up` then works from a single file with nothing to copy
-// alongside it — which matters when the binary runs in a CI container.
+// Two migration sets live side by side, one per SQL dialect:
 //
-//go:embed migrations/*.sql
+//	migrations/postgres/  the production schema
+//	migrations/sqlite/    the same tables and columns, phrased for SQLite
+//
+// They share version numbers and file basenames — migration N is applied
+// under whichever directory the URL selects — and a test in this package
+// asserts the two dialects end up with the same table and column sets, so a
+// migration added for one backend cannot silently skip the other.
+//
+//go:embed migrations/postgres/*.sql migrations/sqlite/*.sql
 var migrationsFS embed.FS
+
+// SQLiteURLPrefix is the DATABASE_URL scheme that selects the SQLite store.
+// A URL like sqlite:///home/me/history.db opens (and migrates) that file.
+const SQLiteURLPrefix = "sqlite://"
+
+// IsSQLiteURL reports whether a DATABASE_URL selects SQLite.
+func IsSQLiteURL(databaseURL string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(databaseURL)), SQLiteURLPrefix)
+}
 
 // Migrator applies schema migrations.
 type Migrator struct {
@@ -27,14 +47,19 @@ type Migrator struct {
 
 // NewMigrator prepares migrations against the given database URL.
 //
-// It takes a URL rather than the pgx pool because golang-migrate needs its own
-// database/sql handle; sharing the pool is not supported.
+// It takes a URL rather than a Store because golang-migrate needs its own
+// database/sql handle; sharing the pgx pool is not supported.
 func NewMigrator(databaseURL string) (*Migrator, error) {
 	if databaseURL == "" {
 		return nil, fmt.Errorf("migrate: database URL is required")
 	}
 
-	source, err := iofs.New(migrationsFS, "migrations")
+	sourceDir := "migrations/postgres"
+	if IsSQLiteURL(databaseURL) {
+		sourceDir = "migrations/sqlite"
+	}
+
+	source, err := iofs.New(migrationsFS, sourceDir)
 	if err != nil {
 		return nil, fmt.Errorf("migrate: load embedded migrations: %w", err)
 	}
@@ -86,6 +111,6 @@ func (m *Migrator) Close() error {
 	return errors.Join(sourceErr, dbErr)
 }
 
-// MigrationsFS exposes the embedded migrations for integration tests that build
-// a schema directly.
+// MigrationsFS exposes the embedded migrations for tests that build a schema
+// directly and for the dialect-parity check.
 func MigrationsFS() embed.FS { return migrationsFS }

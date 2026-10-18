@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/soroworks/soroforge/internal/deploy"
+	"github.com/soroworks/soroforge/internal/netcheck"
 	"github.com/soroworks/soroforge/internal/store"
 )
 
@@ -376,6 +377,84 @@ func printNetworkStatus(r *deploy.NetworkStatus) error {
 	}
 	fmt.Fprintf(w, "\n%d of %d contract(s) on %s in sync.\n", synced, len(r.Contracts), r.Network)
 	return nil
+}
+
+// printNetworkResults renders the `soroforge networks` report. The RPC URL is
+// always the redacted one from the probe result — the raw URL can carry
+// provider credentials in userinfo or the query string, and nothing here may
+// leak them, including in the --json payload a user is encouraged to paste.
+func printNetworkResults(results []netcheck.Result) error {
+	if flags.jsonOutput {
+		return printJSON(map[string]any{
+			"networks": results,
+			"all_ok":   !netcheck.AnyFailure(results),
+		})
+	}
+
+	w := out()
+	if len(results) == 0 {
+		fmt.Fprintln(w, "No networks are configured.")
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "NETWORK\tRESPONDED\tLATENCY\tLATEST LEDGER\tPASSPHRASE\tRPC")
+	for _, r := range results {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			r.Network,
+			yesNo(r.Responded),
+			formatLatency(r.Latency),
+			formatLedger(r.LatestLedger),
+			passphraseVerdict(r),
+			r.RedactedURL,
+		)
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+
+	for _, r := range results {
+		if !r.OK {
+			fmt.Fprintf(w, "\n%s: %s\n", r.Network, r.Error)
+		}
+	}
+
+	healthy := 0
+	for _, r := range results {
+		if r.OK {
+			healthy++
+		}
+	}
+	fmt.Fprintf(w, "\n%d of %d network(s) healthy.\n", healthy, len(results))
+	return nil
+}
+
+func yesNo(v bool) string {
+	if v {
+		return "yes"
+	}
+	return "no"
+}
+
+// passphraseVerdict distinguishes "the endpoint confirmed the network" from
+// "the endpoint never answered getNetwork": an unverified passphrase is not a
+// mismatch, it is unknown, and the report must not imply otherwise.
+func passphraseVerdict(r netcheck.Result) string {
+	switch {
+	case !r.PassphraseVerified:
+		return "not verified"
+	case r.PassphraseMatch:
+		return "match"
+	default:
+		return "MISMATCH"
+	}
+}
+
+func formatLatency(d time.Duration) string {
+	if d <= 0 {
+		return "-"
+	}
+	return d.Round(time.Millisecond).String()
 }
 
 func formatTime(t time.Time) string {

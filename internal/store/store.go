@@ -141,11 +141,32 @@ type Store interface {
 	// History returns a contract's deployments, newest first.
 	History(ctx context.Context, network, alias string) ([]Deployment, error)
 
+	// ListAllDeployments returns every recorded deployment across all
+	// networks and aliases, in id order. It backs `soroforge history export`,
+	// which must capture deployments whose alias has since left the config —
+	// History alone cannot enumerate them, because it needs a (network,
+	// alias) to start from.
+	ListAllDeployments(ctx context.Context) ([]Deployment, error)
+
 	// HistoryPage returns one newest-first page of a contract's deployment log.
 	HistoryPage(ctx context.Context, network, alias string, limit, offset int) ([]Deployment, error)
 
 	// Close releases resources held by the store.
 	Close() error
+}
+
+// Open returns the production Store selected by the DATABASE_URL scheme:
+// sqlite://... opens the file-backed SQLite store, anything else is treated
+// as a Postgres connection string.
+//
+// The dispatch lives here so the CLI and any future entry point get one
+// answer to "which backend is this URL", consistent with NewMigrator, which
+// reads the same scheme to pick a migration set.
+func Open(ctx context.Context, databaseURL string) (Store, error) {
+	if IsSQLiteURL(databaseURL) {
+		return NewSQLite(ctx, databaseURL)
+	}
+	return NewPostgres(ctx, databaseURL)
 }
 
 func validatePage(limit, offset int) error {
