@@ -395,11 +395,28 @@ contracts:
 | `SOROFORGE_MAX_CONTRACT_SIZE` | Override the network's contract WASM size limit, in bytes. |
 | `SOROFORGE_API_TOKEN` | Read-write bearer token for `serve`. |
 | `SOROFORGE_API_TOKENS` | Scoped bearer tokens for `serve`, as `name:scope:token` entries — see below. |
+| `SOROFORGE_API_CORS_ORIGINS` | Comma-separated exact origins allowed to call `serve` from a browser. Unset (default) sends no CORS headers. |
 | `SOROFORGE_API_ADDR` | Listen address (default `127.0.0.1:8080`). |
 | `SOROFORGE_LOG_FORMAT` | `text` (default) or `json`; same as `--log-format`. |
 | `SOROFORGE_CONFIG` | Config file path (default `./soroforge.yaml`). |
 | `TEST_DATABASE_URL` | Enables Postgres integration tests. |
 | `SOROFORGE_LIVE` | Enables the live testnet smoke tests. |
+
+**Browser dashboards (CORS).** By default the API sends no CORS headers, so
+only same-origin or non-browser clients can call it. Set
+`SOROFORGE_API_CORS_ORIGINS` to a comma-separated list of the exact origins
+your dashboard is served from to allow cross-origin calls:
+
+```bash
+SOROFORGE_API_CORS_ORIGINS="https://dash.example.com,https://ops.example.com"
+```
+
+This is an explicit, narrow opt-in on purpose: the API can deploy contracts
+with the configured signing key, so `*` is rejected with an error at startup —
+every origin must be listed exactly, as `scheme://host[:port]` with no path,
+trailing slash, or wildcard. Preflight requests are answered without a bearer
+token (browsers never send one); actual requests still require authentication
+regardless of origin.
 
 ---
 

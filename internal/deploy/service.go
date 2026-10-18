@@ -19,6 +19,7 @@ import (
 	"io"
 	"log/slog"
 	"math/rand"
+	"net/url"
 	"sync"
 	"time"
 
@@ -38,7 +39,19 @@ import (
 type ClientFactory func(networkName string, network config.Network) (stellar.Client, error)
 
 // DefaultClientFactory connects to the network's configured RPC endpoint.
+//
+// The URL's shape is checked before stellar.NewRPCClient sees it, because the
+// SDK constructor only rejects an empty string: any other malformed endpoint
+// would survive construction and fail later as an opaque error on the first
+// request. Checking here names the bad value while the config file is still
+// open, and costs nothing — building a client makes no network call.
 func DefaultClientFactory(_ string, network config.Network) (stellar.Client, error) {
+	u, err := url.Parse(network.RPCURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, fmt.Errorf(
+			"invalid RPC URL %q: expected an http or https URL with a host (e.g. https://soroban-testnet.stellar.org)",
+			network.RPCURL)
+	}
 	return stellar.NewRPCClient(stellar.RPCOptions{
 		URL:               network.RPCURL,
 		NetworkPassphrase: network.Passphrase,

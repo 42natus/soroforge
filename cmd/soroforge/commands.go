@@ -680,6 +680,11 @@ Endpoints:
 				return err
 			}
 
+			corsOrigins, err := config.ParseCORSOrigins(a.cfg.Env.APICORSOrigins)
+			if err != nil {
+				return err
+			}
+
 			readinessChecker, err := readiness.New(readiness.Options{
 				Store:   a.store,
 				Config:  a.cfg,
@@ -696,10 +701,11 @@ Endpoints:
 			}
 
 			handler, err := api.NewRouter(api.Options{
-				Service:   a.service,
-				Tokens:    tokens,
-				Readiness: readinessChecker,
-				Log:       slog.Default(),
+				Service:     a.service,
+				Tokens:      tokens,
+				Readiness:   readinessChecker,
+				CORSOrigins: corsOrigins,
+				Log:         slog.Default(),
 			})
 			if err != nil {
 				return err

@@ -36,6 +36,77 @@ func TestLoadEnvReadsAllVariables(t *testing.T) {
 	assert.Equal(t, "json", env.LogFormat)
 }
 
+func TestLoadEnvReadsCORSOrigins(t *testing.T) {
+	// Only the whole value is trimmed here; per-entry trimming and validation
+	// belong to ParseCORSOrigins, which the serve entry point calls.
+	t.Setenv(EnvAPICORSOrigins, "  https://dash.example.com,https://ops.example.com  ")
+
+	env := LoadEnv()
+
+	assert.Equal(t, "https://dash.example.com,https://ops.example.com", env.APICORSOrigins)
+}
+
+func TestParseCORSOrigins(t *testing.T) {
+	t.Run("unset means no origins and no CORS", func(t *testing.T) {
+		origins, err := ParseCORSOrigins("")
+		require.NoError(t, err)
+		assert.Empty(t, origins, "an unset variable must leave CORS exactly as it is today")
+	})
+
+	t.Run("exact origins are kept in order", func(t *testing.T) {
+		origins, err := ParseCORSOrigins("https://dash.example.com,https://ops.example.com")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"https://dash.example.com", "https://ops.example.com"}, origins)
+	})
+
+	t.Run("whitespace is tolerated and empty entries are skipped", func(t *testing.T) {
+		origins, err := ParseCORSOrigins(" https://dash.example.com , ,https://ops.example.com,")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"https://dash.example.com", "https://ops.example.com"}, origins)
+	})
+
+	t.Run("http origins with a port are allowed", func(t *testing.T) {
+		origins, err := ParseCORSOrigins("http://localhost:3000")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"http://localhost:3000"}, origins)
+	})
+
+	t.Run("wildcard is rejected with an explanation", func(t *testing.T) {
+		_, err := ParseCORSOrigins("*")
+		require.Error(t, err)
+		assert.ErrorContains(t, err, EnvAPICORSOrigins)
+		assert.ErrorContains(t, err, `must not contain "*"`)
+		assert.ErrorContains(t, err, "exact origins")
+	})
+
+	t.Run("a wildcard anywhere in an entry is rejected", func(t *testing.T) {
+		_, err := ParseCORSOrigins("https://*.example.com")
+		require.Error(t, err)
+		assert.ErrorContains(t, err, `must not contain "*"`)
+	})
+
+	t.Run("malformed entries are rejected", func(t *testing.T) {
+		tests := map[string]string{
+			"no scheme":       "dash.example.com",
+			"unparseable":     "://dash.example.com",
+			"non-http scheme": "ftp://dash.example.com",
+			"no host":         "https://",
+			"trailing slash":  "https://dash.example.com/",
+			"has a path":      "https://dash.example.com/app",
+			"has a query":     "https://dash.example.com?x=1",
+		}
+
+		for name, raw := range tests {
+			t.Run(name, func(t *testing.T) {
+				_, err := ParseCORSOrigins(raw)
+				require.Error(t, err)
+				assert.ErrorContains(t, err, EnvAPICORSOrigins)
+				assert.ErrorContains(t, err, "not a valid origin")
+			})
+		}
+	})
+}
+
 func TestListenAddrDefaultsToLoopback(t *testing.T) {
 	// The process holds a signing key; exposing it beyond loopback should be a
 	// deliberate act, not a default.

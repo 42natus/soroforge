@@ -25,6 +25,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/cors"
+	"github.com/soroworks/soroforge/internal/config"
 	"github.com/soroworks/soroforge/internal/deploy"
 	"github.com/soroworks/soroforge/internal/readiness"
 	"github.com/soroworks/soroforge/internal/store"
@@ -74,6 +76,13 @@ const requestTimeout = 5 * time.Minute
 // the decoder is stopped at the limit instead.
 const maxRequestBodyBytes = 64 << 10 // 64 KiB
 
+// preflightMaxAge bounds how long a browser may cache a preflight answer.
+//
+// Long enough that a dashboard polling the API does not preflight every
+// request; short enough that a change to the origin list takes effect without
+// waiting out an hour-long cache.
+const preflightMaxAge = 10 * time.Minute
+
 // Options configures the HTTP server.
 type Options struct {
 	// Service performs the work. Required.
@@ -85,6 +94,16 @@ type Options struct {
 
 	// Readiness checks dependencies for GET /ready. Required.
 	Readiness Readiness
+
+	// CORSOrigins, when non-empty, allows exactly these browser origins to
+	// call the API cross-origin; empty (the default) sends no CORS headers at
+	// all, which is the behaviour every non-browser client has always seen.
+	// The API can deploy contracts with the configured signing key, so this is
+	// an explicit opt-in over exact origins: config.ValidateCORSOrigin rejects
+	// "*" and any other wildcard, and NewRouter applies the same validation
+	// here so a library caller cannot ask for what the environment variable
+	// would be refused.
+	CORSOrigins []string
 
 	// Log defaults to slog.Default().
 	Log *slog.Logger
@@ -136,9 +155,10 @@ func (h *handlers) routes() []route {
 
 // NewRouter builds the HTTP handler.
 //
-// It returns an error rather than a router when the tokens are unusable or a
-// required dependency is missing, so that a misconfigured server fails at
-// startup instead of serving unauthenticated deploy endpoints.
+// It returns an error rather than a router when the tokens are unusable, a
+// required dependency is missing, or the CORS origins are not exact — so that
+// a misconfigured server fails at startup instead of serving unauthenticated
+// deploy endpoints.
 func NewRouter(opts Options) (http.Handler, error) {
 	if opts.Service == nil {
 		return nil, fmt.Errorf("api: service is required")
@@ -148,6 +168,15 @@ func NewRouter(opts Options) (http.Handler, error) {
 	}
 	if opts.Readiness == nil {
 		return nil, fmt.Errorf("api: readiness is required")
+	}
+	// The origins are validated here as well as where the environment variable
+	// is parsed: Options is the library-facing surface, and a server that
+	// refuses a wildcard from configuration must refuse the same wildcard
+	// passed in directly, or the guarantee is only skin deep.
+	for _, origin := range opts.CORSOrigins {
+		if err := config.ValidateCORSOrigin(origin); err != nil {
+			return nil, fmt.Errorf("api: %w", err)
+		}
 	}
 
 	log := opts.Log
@@ -175,7 +204,29 @@ func NewRouter(opts Options) (http.Handler, error) {
 		r.With(auth.authorize(rt.scope, rt.pattern)).Method(rt.method, rt.pattern, rt.handler)
 	}
 
-	return r, nil
+	var handler http.Handler = r
+	if len(opts.CORSOrigins) > 0 {
+		// The middleware wraps the router rather than joining its middleware
+		// stack: a preflight request deliberately carries no Authorization
+		// header, so the CORS handler must answer it before the auth-wrapped
+		// routes are ever reached. Actual requests pass through CORS on their
+		// way to authentication, which still applies to them in full.
+		handler = cors.New(cors.Options{
+			AllowedOrigins: opts.CORSOrigins,
+			// Only the methods routes() declares — the API has no others, and
+			// naming them keeps a future endpoint an explicit change.
+			AllowedMethods: []string{http.MethodGet, http.MethodPost},
+			// The headers the API actually uses: the bearer token and JSON
+			// request bodies. Everything else stays unallowed.
+			AllowedHeaders: []string{"Authorization", "Content-Type"},
+			MaxAge:         int(preflightMaxAge / time.Second),
+			// No AllowCredentials: the API authenticates with bearer tokens in
+			// a header, not cookies, so browsers need not attach credentials
+			// to cross-origin calls.
+		}).Handler(handler)
+	}
+
+	return handler, nil
 }
 
 // accessLog returns middleware that writes one structured line per request.
