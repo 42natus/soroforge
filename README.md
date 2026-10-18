@@ -110,6 +110,59 @@ nothing is recorded.
 
 ---
 
+## Install
+
+### Release binaries
+
+Download the archive for your platform from the
+[latest release](https://github.com/soroworks/soroforge/releases/latest).
+Each archive ships with an SPDX SBOM (`<archive>.sbom.json`) listing what went
+into it, and every archive, SBOM and binary carries a GitHub build-provenance
+attestation tying it to the release workflow run and commit that built it.
+
+SoroForge holds deployer keys, so verify what you run before you run it, using
+the [GitHub CLI](https://cli.github.com/):
+
+```bash
+gh attestation verify soroforge_<version>_linux_amd64.tar.gz -R soroworks/soroforge
+
+# The extracted binary verifies the same way:
+tar xzf soroforge_<version>_linux_amd64.tar.gz
+gh attestation verify soroforge -R soroworks/soroforge
+```
+
+`checksums.txt` in the release still lists SHA-256 sums for every archive and
+SBOM.
+
+### Container image
+
+Each release publishes a multi-arch image (linux/amd64, linux/arm64) to GitHub
+Container Registry, built from the same commit and binary as the release
+archives:
+
+```bash
+docker pull ghcr.io/soroworks/soroforge:latest      # or a version, e.g. :0.3.0
+docker run --rm ghcr.io/soroworks/soroforge:latest version
+```
+
+Run the HTTP API from your project directory. Inside a container the server must
+listen on all interfaces, so set `SOROFORGE_API_ADDR` explicitly and publish the
+port only where you need it:
+
+```bash
+docker run --rm -p 127.0.0.1:8080:8080 \
+  -v "$PWD:/work" -w /work \
+  -e DATABASE_URL -e SOROFORGE_SECRET_KEY -e SOROFORGE_API_TOKEN \
+  -e SOROFORGE_API_ADDR=0.0.0.0:8080 \
+  ghcr.io/soroworks/soroforge:latest serve
+```
+
+The image runs as a non-root user and contains no secrets; pass them through the
+environment or mount a keystore file (`SOROFORGE_KEYSTORE_PATH`). Pin a version
+tag in Kubernetes or Compose rather than `:latest`.
+
+---
+
 ## Quickstart — deploy to testnet
 
 **Prerequisites:** Go 1.26+ (required by `modernc.org/sqlite`, the SQLite

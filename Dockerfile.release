@@ -1,0 +1,23 @@
+# Release image, built by GoReleaser (dockers_v2 in .goreleaser.yaml) on each
+# tagged release and pushed to ghcr.io/soroworks/soroforge.
+#
+# Unlike ./Dockerfile it does not compile anything: GoReleaser places the
+# binary it already built for the release archives at $TARGETPLATFORM/soroforge
+# in the build context, so the image runs byte-for-byte the same binary, built
+# from the same commit and reporting the same version, as the downloads.
+#
+# For a local image built from source, use ./Dockerfile (make docker-build).
+
+FROM gcr.io/distroless/static-debian12:nonroot
+
+ARG TARGETPLATFORM
+COPY $TARGETPLATFORM/soroforge /usr/local/bin/soroforge
+
+# The signing key reaches this process through the environment or a mounted
+# keystore file; nothing secret is baked into the image.
+USER nonroot:nonroot
+
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/soroforge"]
+CMD ["--help"]

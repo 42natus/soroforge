@@ -1,0 +1,50 @@
+name: Live testnet smoke
+
+# Runs the read-only smoke tests in internal/stellar/live_test.go against
+# public Stellar testnet. The rest of the suite proves SoroForge is internally
+# consistent; this proves its understanding of the real RPC API still holds
+# after a protocol upgrade or an RPC release we did not make.
+#
+# It is deliberately not run on pull requests: public testnet RPC is
+# rate-limited, and CI must not fail because a public endpoint is down.
+#
+# If a scheduled run fails:
+#   1. Re-run it once. A single failure is often the public RPC endpoint
+#      being down or rate-limiting, not a real break.
+#   2. If it fails again, run `make test-live` locally and read the failing
+#      assertion. A changed response shape usually means a testnet protocol
+#      upgrade or a go-stellar-sdk release that SoroForge has not caught up
+#      with; check the Stellar release notes and open an issue with the log.
+#   3. Do not paper over it by loosening the assertion: the test is the early
+#      warning that deploys against testnet are about to fail.
+
+on:
+  schedule:
+    # Weekly, Monday 07:23 UTC. Off the hour to avoid the scheduler rush.
+    - cron: "23 7 * * 1"
+  workflow_dispatch:
+
+# Read-only: no keys, no submissions, no secrets.
+permissions:
+  contents: read
+
+concurrency:
+  group: live-testnet
+  cancel-in-progress: false
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+          cache: true
+          # Always the newest patch release: security fixes land there.
+          check-latest: true
+
+      - name: Live testnet smoke tests
+        run: make test-live

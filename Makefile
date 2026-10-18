@@ -40,6 +40,11 @@ cover: ## Run tests and open a coverage report
 	go test -coverprofile=coverage.out ./...
 	go tool cover -html=coverage.out
 
+.PHONY: cover-report
+cover-report: ## Print per-package coverage as CI reports it (excludes test helpers)
+	go test -coverprofile=coverage.out ./...
+	@scripts/coverage.sh coverage.out
+
 .PHONY: test-integration
 test-integration: ## Run tests including the Postgres integration suite
 	TEST_DATABASE_URL="$(DATABASE_URL)" go test ./... -count=1

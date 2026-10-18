@@ -8,6 +8,13 @@ on:
 
 permissions:
   contents: write
+  # Push the release image to ghcr.io with the built-in GITHUB_TOKEN; no
+  # long-lived registry credentials.
+  packages: write
+  # Build-provenance attestations: a Sigstore certificate bound to this
+  # workflow run (id-token), stored with the repository's attestations.
+  id-token: write
+  attestations: write
 
 jobs:
   release:
@@ -49,10 +56,40 @@ jobs:
           TEST_DATABASE_URL: postgres://soroforge:soroforge@localhost:5432/soroforge?sslmode=disable
         run: go test ./...
 
-      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+      # GoReleaser builds the multi-arch image with buildx; QEMU lets the
+      # amd64 runner build the arm64 variant.
+      - uses: docker/setup-qemu-action@v4
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # GoReleaser shells out to Syft for the per-archive SBOMs.
+      - uses: anchore/sbom-action/download-syft@v0
+
+      - uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: "~> v2"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Link every release file to this workflow run, so users can check with
+      # `gh attestation verify` that it was built here from the tagged commit.
+      # checksums.txt lists the archives and their SBOMs.
+      - name: Attest release archives and SBOMs
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-checksums: ./dist/checksums.txt
+
+      # The bare binaries too, so a binary already extracted from its archive
+      # can still be verified.
+      - name: Attest binaries
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: "./dist/soroforge_*/soroforge*"
