@@ -52,6 +52,9 @@ func printDeployResult(r *deploy.DeployResult) error {
 	}
 
 	fmt.Fprintf(w, "  Contract ID   %s\n", r.ContractID)
+	if r.ContractURL != "" {
+		fmt.Fprintf(w, "  Explorer      %s\n", r.ContractURL)
+	}
 	fmt.Fprintf(w, "  WASM hash     %s\n", r.WasmHash)
 	fmt.Fprintf(w, "  Network       %s\n", r.Network)
 	fmt.Fprintf(w, "  Deployer      %s\n", r.Deployer)
@@ -61,9 +64,15 @@ func printDeployResult(r *deploy.DeployResult) error {
 		fmt.Fprintf(w, "  Upload        skipped (this bytecode is already on-chain)\n")
 	} else if r.UploadTxHash != "" {
 		fmt.Fprintf(w, "  Upload tx     %s\n", r.UploadTxHash)
+		if r.UploadTxURL != "" {
+			fmt.Fprintf(w, "  Upload URL    %s\n", r.UploadTxURL)
+		}
 	}
 	if r.CreateTxHash != "" {
 		fmt.Fprintf(w, "  Create tx     %s\n", r.CreateTxHash)
+		if r.CreateTxURL != "" {
+			fmt.Fprintf(w, "  Create URL    %s\n", r.CreateTxURL)
+		}
 	}
 	if r.InitTxHash != "" {
 		fmt.Fprintf(w, "  Init tx       %s\n", r.InitTxHash)
@@ -105,6 +114,9 @@ func printUpgradeResult(r *deploy.UpgradeResult) error {
 		fmt.Fprintf(w, "%s on %s already runs this WASM hash — nothing to do.\n\n",
 			r.Alias, r.Network)
 		fmt.Fprintf(w, "  Contract ID   %s\n", r.ContractID)
+		if r.ContractURL != "" {
+			fmt.Fprintf(w, "  Explorer      %s\n", r.ContractURL)
+		}
 		fmt.Fprintf(w, "  WASM hash     %s\n", r.WasmHash)
 		return nil
 	}
@@ -116,6 +128,9 @@ func printUpgradeResult(r *deploy.UpgradeResult) error {
 	}
 
 	fmt.Fprintf(w, "  Contract ID   %s\n", r.ContractID)
+	if r.ContractURL != "" {
+		fmt.Fprintf(w, "  Explorer      %s\n", r.ContractURL)
+	}
 	fmt.Fprintf(w, "  From          %s\n", r.PreviousWasmHash)
 	fmt.Fprintf(w, "  To            %s\n", r.WasmHash)
 	fmt.Fprintf(w, "  Entrypoint    %s\n", r.UpgradeFunc)
@@ -126,9 +141,15 @@ func printUpgradeResult(r *deploy.UpgradeResult) error {
 		fmt.Fprintf(w, "  Upload        skipped (this bytecode is already on-chain)\n")
 	} else if r.UploadTxHash != "" {
 		fmt.Fprintf(w, "  Upload tx     %s\n", r.UploadTxHash)
+		if r.UploadTxURL != "" {
+			fmt.Fprintf(w, "  Upload URL    %s\n", r.UploadTxURL)
+		}
 	}
 	if r.UpgradeTxHash != "" {
 		fmt.Fprintf(w, "  Upgrade tx    %s\n", r.UpgradeTxHash)
+		if r.UpgradeTxURL != "" {
+			fmt.Fprintf(w, "  Upgrade URL   %s\n", r.UpgradeTxURL)
+		}
 	}
 	if r.Ledger != 0 {
 		fmt.Fprintf(w, "  Ledger        %d\n", r.Ledger)
@@ -297,8 +318,19 @@ func printHistory(alias, network string, deployments []store.Deployment) error {
 
 	fmt.Fprintf(out(), "History for %s on %s (newest first):\n\n", alias, network)
 
+	hasExplorerLinks := false
+	for _, d := range deployments {
+		if d.ContractURL != "" || d.TxURL != "" {
+			hasExplorerLinks = true
+			break
+		}
+	}
 	tw := tabwriter.NewWriter(out(), 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "WHEN\tACTION\tWASM HASH\tDEPLOYER\tLEDGER\tFEE (STROOPS)\tFEE (XLM)\tCOMMIT\tTX\tCI RUN\tNOTES")
+	header := "WHEN\tACTION\tWASM HASH\tDEPLOYER\tLEDGER\tFEE (STROOPS)\tFEE (XLM)\tCOMMIT\tTX\tCI RUN"
+	if hasExplorerLinks {
+		header += "\tCONTRACT URL\tTX URL"
+	}
+	fmt.Fprintln(tw, header+"\tNOTES")
 	for _, d := range deployments {
 		feeStroops, feeXLM := "-", "-"
 		if d.FeeCharged != nil {
@@ -330,9 +362,9 @@ func printHistory(alias, network string, deployments []store.Deployment) error {
 				notes = inv
 			}
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		cols := []string{
 			formatTime(d.CreatedAt),
-			d.Action,
+			string(d.Action),
 			shortHash(d.WasmHash),
 			shortHash(d.DeployerPubkey),
 			formatLedger(d.Ledger),
@@ -341,8 +373,12 @@ func printHistory(alias, network string, deployments []store.Deployment) error {
 			commit,
 			shortHash(d.TxHash),
 			ciRun,
-			truncate(notes, 40),
-		)
+		}
+		if hasExplorerLinks {
+			cols = append(cols, d.ContractURL, d.TxURL)
+		}
+		cols = append(cols, truncate(notes, 40))
+		fmt.Fprintln(tw, strings.Join(cols, "\t"))
 	}
 	return tw.Flush()
 }

@@ -104,6 +104,7 @@ func (s *stubClient) LoadAccount(context.Context, string) (txnbuild.Account, err
 func (s *stubClient) Simulate(context.Context, string) (stellar.SimulateResult, error) {
 	panic("unused")
 }
+func (s *stubClient) NetworkInfo(context.Context) (string, error)              { panic("unused by netcheck") }
 func (s *stubClient) Send(context.Context, string) (stellar.SendResult, error) { panic("unused") }
 func (s *stubClient) AwaitTransaction(context.Context, string) (stellar.TxResult, error) {
 	panic("unused")

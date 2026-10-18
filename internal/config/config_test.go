@@ -17,6 +17,7 @@ networks:
     rpc_url: https://soroban-testnet.stellar.org
     passphrase: "Test SDF Network ; September 2015"
     sorovault_url: http://localhost:8080
+    explorer_url: https://stellar.expert/explorer/testnet
   mainnet:
     rpc_url: https://mainnet.example.org
     passphrase: "Public Global Stellar Network ; September 2015"
@@ -48,7 +49,13 @@ func TestLoadValidConfig(t *testing.T) {
 	assert.Len(t, cfg.Networks, 2)
 	assert.Len(t, cfg.Contracts, 2)
 	assert.Equal(t, "http://localhost:8080", cfg.Networks["testnet"].SoroVaultURL)
+	assert.Equal(t, "https://stellar.expert/explorer/testnet", cfg.Networks["testnet"].ExplorerURL)
+	assert.Equal(t, "https://stellar.expert/explorer/testnet/contract/C123",
+		cfg.Networks["testnet"].ContractExplorerURL("C123"))
+	assert.Equal(t, "https://stellar.expert/explorer/testnet/tx/ABC",
+		cfg.Networks["testnet"].TransactionExplorerURL("ABC"))
 	assert.Empty(t, cfg.Networks["mainnet"].SoroVaultURL, "the registry is optional per network")
+	assert.Empty(t, cfg.Networks["mainnet"].ContractExplorerURL("C123"))
 }
 
 func TestNetworkLookupFallsBackToDefault(t *testing.T) {
@@ -229,6 +236,20 @@ contracts:
   counter: {wasm: ./c.wasm}
 `,
 			wantErr: "networks.testnet.sorovault_url",
+		},
+		"explorer url without scheme": {
+			config: `
+version: 1
+default_network: testnet
+networks:
+  testnet:
+    rpc_url: https://rpc.example.org
+    passphrase: "Test SDF Network ; September 2015"
+    explorer_url: explorer.example.org
+contracts:
+  counter: {wasm: ./c.wasm}
+`,
+			wantErr: "networks.testnet.explorer_url",
 		},
 		"contract without wasm": {
 			config: `

@@ -15,9 +15,8 @@ const SupportedVersion = 1
 //
 // It reports every problem it finds rather than stopping at the first, because
 // fixing a config one error per run is a miserable way to start with a tool.
-// Filesystem checks are deliberately excluded: whether a WASM artifact exists
-// yet depends on whether the contract has been built, which is not a property
-// of the configuration.
+// Filesystem and network checks are deliberately excluded; `soroforge config
+// check` performs those environment-dependent checks on demand.
 func (c *Config) Validate() error {
 	var problems []string
 
@@ -88,6 +87,12 @@ func validateNetwork(name string, n Network) []string {
 
 	if n.SoroVaultURL != "" {
 		if p := checkHTTPURL(prefix+".sorovault_url", n.SoroVaultURL); p != "" {
+			problems = append(problems, p)
+		}
+	}
+
+	if n.ExplorerURL != "" {
+		if p := checkHTTPURL(prefix+".explorer_url", n.ExplorerURL); p != "" {
 			problems = append(problems, p)
 		}
 	}

@@ -24,9 +24,10 @@ type UpgradeRequest struct {
 
 // UpgradeResult describes a completed or simulated upgrade.
 type UpgradeResult struct {
-	Alias      string `json:"alias"`
-	Network    string `json:"network"`
-	ContractID string `json:"contract_id"`
+	Alias       string `json:"alias"`
+	Network     string `json:"network"`
+	ContractID  string `json:"contract_id"`
+	ContractURL string `json:"contract_url,omitempty"`
 
 	// PreviousWasmHash and WasmHash are the version transition this upgrade
 	// performs. Recording both is what makes the history answer "what changed".
@@ -40,6 +41,8 @@ type UpgradeResult struct {
 
 	UploadTxHash  string `json:"upload_tx_hash,omitempty"`
 	UpgradeTxHash string `json:"upgrade_tx_hash,omitempty"`
+	UploadTxURL   string `json:"upload_tx_url,omitempty"`
+	UpgradeTxURL  string `json:"upgrade_tx_url,omitempty"`
 	Ledger        uint32 `json:"ledger,omitempty"`
 
 	DryRun bool `json:"dry_run"`
@@ -196,6 +199,7 @@ func (s *Service) Upgrade(ctx context.Context, req UpgradeRequest) (*UpgradeResu
 		Alias:            r.Alias,
 		Network:          r.NetworkName,
 		ContractID:       tracked.ContractID,
+		ContractURL:      r.Network.ContractExplorerURL(tracked.ContractID),
 		PreviousWasmHash: tracked.CurrentWasmHash,
 		WasmHash:         wasmHashHex,
 		Deployer:         signer.Address(),
@@ -231,6 +235,7 @@ func (s *Service) Upgrade(ctx context.Context, req UpgradeRequest) (*UpgradeResu
 			result.UploadSkipped = true
 		} else {
 			result.UploadTxHash = upload.Hash
+			result.UploadTxURL = r.Network.TransactionExplorerURL(upload.Hash)
 			result.UploadEnvelopeXDR = upload.EnvelopeXDR
 		}
 	}
@@ -258,6 +263,7 @@ func (s *Service) Upgrade(ctx context.Context, req UpgradeRequest) (*UpgradeResu
 		return nil, fmt.Errorf("invoke %s on %s: %w", upgradeFunc, tracked.ContractID, err)
 	}
 	result.UpgradeTxHash = upgrade.Hash
+	result.UpgradeTxURL = r.Network.TransactionExplorerURL(upgrade.Hash)
 	result.UpgradeEnvelopeXDR = upgrade.EnvelopeXDR
 	result.Ledger = upgrade.Ledger
 

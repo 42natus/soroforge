@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/soroworks/soroforge/internal/catalog"
 	"github.com/soroworks/soroforge/internal/config"
@@ -239,6 +240,25 @@ func TestDeployRecordsContractAndHistory(t *testing.T) {
 		"history records the confirmed fee, not the simulation estimate")
 }
 
+func TestDeployIncludesExplorerLinks(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	network := h.cfg.Networks["testnet"]
+	network.ExplorerURL = "https://stellar.expert/explorer/testnet/"
+	h.cfg.Networks["testnet"] = network
+
+	result, err := h.svc.Deploy(context.Background(), deploy.DeployRequest{Alias: "counter"})
+	require.NoError(t, err)
+	assert.Equal(t, "https://stellar.expert/explorer/testnet/contract/"+h.contractID, result.ContractURL)
+	assert.Equal(t, "https://stellar.expert/explorer/testnet/tx/"+result.UploadTxHash, result.UploadTxURL)
+	assert.Equal(t, "https://stellar.expert/explorer/testnet/tx/"+result.CreateTxHash, result.CreateTxURL)
+
+	history, err := h.svc.History(context.Background(), "testnet", "counter")
+	require.NoError(t, err)
+	require.Len(t, history, 1)
+	assert.Equal(t, result.ContractURL, history[0].ContractURL)
+	assert.Equal(t, result.CreateTxURL, history[0].TxURL)
+}
+
 func TestDeployDryRunSubmitsNothingAndRecordsNothing(t *testing.T) {
 	// This is the guarantee that makes --dry-run safe to point at mainnet.
 	h := newHarness(t, harnessOptions{})
@@ -404,6 +424,67 @@ func TestDeployReportsRejectedSubmission(t *testing.T) {
 
 	_, err := h.svc.Deploy(context.Background(), deploy.DeployRequest{Alias: "counter"})
 	assert.ErrorContains(t, err, "rejected by the network")
+}
+
+func TestDeployRetriesTryAgainLaterWithSameEnvelope(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	sends := 0
+	h.client.SendFunc = func(_ context.Context, _ string) (stellar.SendResult, error) {
+		sends++
+		if sends <= 2 {
+			return stellar.SendResult{Status: stellar.SendStatusTryAgainLater, Hash: "retry-hash"}, nil
+		}
+		return stellar.SendResult{
+			Status: stellar.SendStatusPending,
+			Hash:   h.client.SendHash,
+		}, nil
+	}
+
+	_, err := h.svc.Deploy(context.Background(), deploy.DeployRequest{Alias: "counter"})
+	require.NoError(t, err)
+	assert.Equal(t, 4, sends, "two retries precede each transaction's accepted send")
+	require.Len(t, h.client.Sent, 4)
+	assert.Equal(t, h.client.Sent[0], h.client.Sent[1])
+	assert.Equal(t, h.client.Sent[1], h.client.Sent[2])
+}
+
+func TestDeployStopsRetryingAfterMaximumAttempts(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	h.client.SendFunc = func(context.Context, string) (stellar.SendResult, error) {
+		return stellar.SendResult{
+			Status: stellar.SendStatusTryAgainLater,
+			Hash:   h.client.SendHash,
+		}, nil
+	}
+
+	_, err := h.svc.Deploy(context.Background(), deploy.DeployRequest{Alias: "counter"})
+	require.ErrorContains(t, err, "after 5 attempts")
+	assert.Equal(t, 5, h.client.SendCount())
+}
+
+func TestDeployRetryWaitRespectsConfirmTimeout(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	svc, err := deploy.New(deploy.Options{
+		Config:         h.cfg,
+		Store:          h.store,
+		Signer:         h.signer,
+		Clients:        func(string, config.Network) (stellar.Client, error) { return h.client, nil },
+		ConfirmTimeout: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	h.svc = svc
+	h.client.SendFunc = func(context.Context, string) (stellar.SendResult, error) {
+		return stellar.SendResult{
+			Status: stellar.SendStatusTryAgainLater,
+			Hash:   h.client.SendHash,
+		}, nil
+	}
+
+	start := time.Now()
+	_, err = h.svc.Deploy(context.Background(), deploy.DeployRequest{Alias: "counter"})
+	require.ErrorContains(t, err, "submission stopped after 1 attempt")
+	assert.Less(t, time.Since(start), 500*time.Millisecond)
+	assert.Equal(t, 1, h.client.SendCount())
 }
 
 func TestDeployRefusesWhenRestoreIsRequired(t *testing.T) {

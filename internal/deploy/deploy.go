@@ -60,16 +60,19 @@ type DeployRequest struct {
 
 // DeployResult describes a completed or simulated deploy.
 type DeployResult struct {
-	Alias      string `json:"alias"`
-	Network    string `json:"network"`
-	ContractID string `json:"contract_id"`
-	WasmHash   string `json:"wasm_hash"`
-	Deployer   string `json:"deployer_pubkey"`
+	Alias       string `json:"alias"`
+	Network     string `json:"network"`
+	ContractID  string `json:"contract_id"`
+	ContractURL string `json:"contract_url,omitempty"`
+	WasmHash    string `json:"wasm_hash"`
+	Deployer    string `json:"deployer_pubkey"`
 
 	// UploadTxHash and CreateTxHash are the two transactions a deploy performs.
 	// Both are empty on a dry run.
 	UploadTxHash string `json:"upload_tx_hash,omitempty"`
 	CreateTxHash string `json:"create_tx_hash,omitempty"`
+	UploadTxURL  string `json:"upload_tx_url,omitempty"`
+	CreateTxURL  string `json:"create_tx_url,omitempty"`
 
 	// InitTxHash is the transaction hash of the initializer invocation, when
 	// init_fn is configured. Empty on a dry run or when no initializer is used.
@@ -162,6 +165,7 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 		result.UploadSkipped = true
 	} else {
 		result.UploadTxHash = upload.Hash
+		result.UploadTxURL = r.Network.TransactionExplorerURL(upload.Hash)
 		result.UploadEnvelopeXDR = upload.EnvelopeXDR
 	}
 
@@ -186,6 +190,7 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 		return nil, fmt.Errorf("create contract: %w", err)
 	}
 	result.CreateTxHash = create.Hash
+	result.CreateTxURL = r.Network.TransactionExplorerURL(create.Hash)
 	result.CreateEnvelopeXDR = create.EnvelopeXDR
 	result.Ledger = create.Ledger
 
@@ -197,6 +202,7 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 		return nil, fmt.Errorf("determine contract id: %w", err)
 	}
 	result.ContractID = contractID
+	result.ContractURL = r.Network.ContractExplorerURL(contractID)
 
 	// Step 3: if an initializer function is configured, prepare its invocation.
 	var initOp *txnbuild.InvokeHostFunction

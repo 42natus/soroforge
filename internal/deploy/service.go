@@ -14,8 +14,12 @@ package deploy
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/soroworks/soroforge/internal/catalog"
@@ -48,6 +52,10 @@ type Service struct {
 	signer  stellar.Signer
 	clients ClientFactory
 	log     *slog.Logger
+
+	clientMu    sync.Mutex
+	clientCache map[string]stellar.Client
+	closed      bool
 
 	// baseFee is the per-operation fee in stroops. The resource fee that
 	// simulation determines is added on top of it.
@@ -156,6 +164,7 @@ func New(opts Options) (*Service, error) {
 		store:           opts.Store,
 		signer:          opts.Signer,
 		clients:         clients,
+		clientCache:     make(map[string]stellar.Client),
 		log:             log,
 		baseFee:         baseFee,
 		confirmTimeout:  confirmTimeout,
@@ -230,9 +239,53 @@ func (s *Service) notifyWebhooks(ctx context.Context, network config.Network, pa
 // network or contract names.
 func (s *Service) Config() *config.Config { return s.cfg }
 
+// Close releases clients created for the service. It is safe to call more than
+// once; clients that do not expose Close need no explicit cleanup.
+func (s *Service) Close() error {
+	s.clientMu.Lock()
+	if s.closed {
+		s.clientMu.Unlock()
+		return nil
+	}
+	s.closed = true
+	clients := s.clientCache
+	s.clientCache = nil
+	s.clientMu.Unlock()
+
+	var errs []error
+	for name, client := range clients {
+		if closer, ok := client.(io.Closer); ok {
+			if err := closer.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("close %s RPC client: %w", name, err))
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (s *Service) clientForNetwork(name string, network config.Network) (stellar.Client, error) {
+	s.clientMu.Lock()
+	defer s.clientMu.Unlock()
+
+	if s.closed {
+		return nil, fmt.Errorf("deploy: service is closed")
+	}
+	if client, ok := s.clientCache[name]; ok {
+		return client, nil
+	}
+
+	client, err := s.clients(name, network)
+	if err != nil {
+		return nil, err
+	}
+	s.clientCache[name] = client
+	return client, nil
+}
+
 // resolve looks up the network and contract a request refers to and connects a
 // client. Every operation starts here, so an unknown alias or network fails the
-// same way regardless of entry point.
+// same way regardless of entry point. Clients are created once per network and
+// shared safely across concurrent operations.
 func (s *Service) resolve(networkName, alias string) (resolved, error) {
 	name, network, err := s.cfg.Network(networkName)
 	if err != nil {
@@ -242,7 +295,7 @@ func (s *Service) resolve(networkName, alias string) (resolved, error) {
 	if err != nil {
 		return resolved{}, err
 	}
-	client, err := s.clients(name, network)
+	client, err := s.clientForNetwork(name, network)
 	if err != nil {
 		return resolved{}, fmt.Errorf("connect to %s: %w", name, err)
 	}
@@ -254,6 +307,12 @@ func (s *Service) resolve(networkName, alias string) (resolved, error) {
 		Client:      client,
 	}, nil
 }
+
+const (
+	maxSubmissionAttempts = 5
+	submissionRetryBase   = 100 * time.Millisecond
+	submissionRetryMax    = 2 * time.Second
+)
 
 type resolved struct {
 	NetworkName string
@@ -354,17 +413,46 @@ func (s *Service) runTransaction(
 		return txResult{}, fmt.Errorf("encode signed transaction: %w", err)
 	}
 
-	sent, err := r.Client.Send(ctx, signedXDR)
-	if err != nil {
-		return txResult{}, err
+	submitCtx, cancel := context.WithTimeout(ctx, s.confirmTimeout)
+	defer cancel()
+
+	var sent stellar.SendResult
+	attempts := 0
+	for attempt := 1; attempt <= maxSubmissionAttempts; attempt++ {
+		attempts = attempt
+		if err := submitCtx.Err(); err != nil {
+			return txResult{}, fmt.Errorf("submission stopped after %d attempt(s): %w", attempt-1, err)
+		}
+		sent, err = r.Client.Send(submitCtx, signedXDR)
+		if err != nil {
+			return txResult{}, fmt.Errorf("send transaction after %d attempt(s): %w", attempt, err)
+		}
+		if sent.Status != stellar.SendStatusTryAgainLater {
+			break
+		}
+		if attempt == maxSubmissionAttempts {
+			return txResult{}, fmt.Errorf(
+				"RPC is busy and did not queue the transaction after %d attempts (transaction %s)",
+				attempt, sent.Hash)
+		}
+
+		s.log.Info("RPC asked to retry transaction submission",
+			"network", r.NetworkName,
+			"attempt", attempt,
+			"max_attempts", maxSubmissionAttempts,
+			"tx_hash", sent.Hash,
+		)
+		if err := waitForRetry(submitCtx, submissionRetryDelay(attempt)); err != nil {
+			return txResult{}, fmt.Errorf("submission stopped after %d attempt(s): %w", attempt, err)
+		}
 	}
 	if err := checkSendStatus(sent); err != nil {
-		return txResult{}, err
+		return txResult{}, fmt.Errorf("submission failed after %d attempt(s): %w", attempts, err)
 	}
 
-	confirmed, err := s.confirm(ctx, r.Client, sent.Hash)
+	confirmed, err := s.confirm(submitCtx, r.Client, sent.Hash)
 	if err != nil {
-		return txResult{}, err
+		return txResult{}, fmt.Errorf("confirmation failed after %d submission attempt(s): %w", attempts, err)
 	}
 
 	return txResult{
@@ -374,6 +462,29 @@ func (s *Service) runTransaction(
 		Simulation:  sim,
 		EnvelopeXDR: signedXDR,
 	}, nil
+}
+
+func submissionRetryDelay(attempt int) time.Duration {
+	delay := submissionRetryBase
+	for i := 1; i < attempt && delay < submissionRetryMax; i++ {
+		delay *= 2
+		if delay > submissionRetryMax {
+			delay = submissionRetryMax
+		}
+	}
+	half := delay / 2
+	return half + time.Duration(rand.Int63n(int64(delay)))
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // checkSendStatus turns a non-PENDING submission into a useful error.

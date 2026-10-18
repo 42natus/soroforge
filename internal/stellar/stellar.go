@@ -29,6 +29,9 @@ type Client interface {
 	// passphrase fails locally instead of after a signed submission.
 	NetworkPassphrase() string
 
+	// NetworkInfo returns the passphrase reported by the RPC endpoint.
+	NetworkInfo(ctx context.Context) (string, error)
+
 	// LoadAccount fetches an account's current sequence number.
 	LoadAccount(ctx context.Context, address string) (txnbuild.Account, error)
 
