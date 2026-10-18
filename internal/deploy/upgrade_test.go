@@ -12,7 +12,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const upgradedWasm = "\x00asm\x01\x00\x00\x00upgraded"
+// upgradedWasm differs from testWasm and is a structurally valid module with a
+// contractspecv0 custom section, so it gets past the pre-upload artifact checks.
+const upgradedWasm = "\x00asm\x01\x00\x00\x00\x00\x0f\x0econtractspecv0"
 
 // trackContract seeds the store as if a deploy had already happened, and points
 // the mocked ledger at the same hash.

@@ -127,7 +127,7 @@ contracts:
     wasm: ./counter.wasm
 `, srv.URL)
 
-	h := newHarness(t, harnessOptions{configBody: cfg, wasm: testWasm + "modified"})
+	h := newHarness(t, harnessOptions{configBody: cfg, wasm: upgradedWasm})
 	trackContract(t, h, stellar.WasmHash([]byte(testWasm)))
 
 	result, err := h.svc.Upgrade(context.Background(), deploy.UpgradeRequest{

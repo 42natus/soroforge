@@ -37,6 +37,19 @@ const (
 	// true) deliberately; the default is to refuse.
 	EnvAllowInsecureKeystore = "SOROFORGE_ALLOW_INSECURE_KEYSTORE"
 
+	// EnvSignerCommand names an executable that signs a transaction hash for
+	// keys SoroForge cannot read, such as HSM- or KMS-backed keys. It is
+	// mutually exclusive with the seed sources above.
+	EnvSignerCommand = "SOROFORGE_SIGNER_COMMAND"
+
+	// EnvSignerPublicKey is the G... address the command signs for. It cannot
+	// be derived without the private key, so it must be configured explicitly.
+	EnvSignerPublicKey = "SOROFORGE_SIGNER_PUBLIC_KEY"
+
+	// EnvMaxContractSize overrides the maximum contract WASM size, in bytes.
+	// Defaults to the network's current limit; see stellar.DefaultMaxContractSize.
+	EnvMaxContractSize = "SOROFORGE_MAX_CONTRACT_SIZE"
+
 	// EnvAPIToken is the original bearer token for the HTTP API. It grants
 	// read and write, so existing single-token deployments keep working. The
 	// server refuses to start when it and EnvAPITokens are both unset.
@@ -102,21 +115,21 @@ const DefaultAPIAddr = "127.0.0.1:8080"
 // serialised anywhere, and leaving the tags off means an accidental
 // json.Marshal of a Config cannot leak it.
 type Env struct {
-	DatabaseURL  string
-	SecretKey    string
-	KeystorePath string
-	APIToken     string
-	APITokens    string
-	APIAddr      string
-	LogFormat    string
-
-	APIRateLimit  string
-	APIRateBurst  string
-	APITrustProxy string
-
-	TLSCert string
-	TLSKey  string
-
+	DatabaseURL     string
+	SecretKey       string
+	KeystorePath    string
+	SignerCommand   string
+	SignerPublicKey string
+	MaxContractSize string
+	APIToken        string
+	APITokens       string
+	APIAddr         string
+	LogFormat       string
+	APIRateLimit    string
+	APIRateBurst    string
+	APITrustProxy   string
+	TLSCert         string
+	TLSKey          string
 	// AllowInsecureKeystore accepts a keystore readable by group or others.
 	// See EnvAllowInsecureKeystore.
 	AllowInsecureKeystore bool
@@ -130,11 +143,14 @@ func LoadEnv() Env {
 		DatabaseURL:           strings.TrimSpace(os.Getenv(EnvDatabaseURL)),
 		SecretKey:             strings.TrimSpace(os.Getenv(EnvSecretKey)),
 		KeystorePath:          strings.TrimSpace(os.Getenv(EnvKeystorePath)),
-		AllowInsecureKeystore: envBool(os.Getenv(EnvAllowInsecureKeystore)),
+		SignerCommand:         strings.TrimSpace(os.Getenv(EnvSignerCommand)),
+		SignerPublicKey:       strings.TrimSpace(os.Getenv(EnvSignerPublicKey)),
+		MaxContractSize:       strings.TrimSpace(os.Getenv(EnvMaxContractSize)),
 		APIToken:              os.Getenv(EnvAPIToken),
 		APITokens:             strings.TrimSpace(os.Getenv(EnvAPITokens)),
 		APIAddr:               strings.TrimSpace(os.Getenv(EnvAPIAddr)),
 		LogFormat:             strings.ToLower(strings.TrimSpace(os.Getenv(EnvLogFormat))),
+		AllowInsecureKeystore: envBool(os.Getenv(EnvAllowInsecureKeystore)),
 		APIRateLimit:          strings.TrimSpace(os.Getenv(EnvAPIRateLimit)),
 		APIRateBurst:          strings.TrimSpace(os.Getenv(EnvAPIRateBurst)),
 		APITrustProxy:         strings.TrimSpace(os.Getenv(EnvAPITrustProxy)),
@@ -278,8 +294,8 @@ func (e Env) SigningSeed() (seed string, source string, err error) {
 	}
 
 	return "", "", fmt.Errorf(
-		"no signing key configured: set %s or %s (see README security notes)",
-		EnvSecretKey, EnvKeystorePath,
+		"no signing key configured: set %s or %s, or point %s at a signer command with %s (see README security notes)",
+		EnvSecretKey, EnvKeystorePath, EnvSignerCommand, EnvSignerPublicKey,
 	)
 }
 
@@ -314,10 +330,55 @@ func checkKeystorePermissions(path string, allowInsecure bool) error {
 	return nil
 }
 
+// ValidateSigningConfig rejects configurations that would otherwise fail
+// halfway through a deploy: an external signer without the address it signs
+// for, or two key sources racing to sign the same transaction.
+func (e Env) ValidateSigningConfig() error {
+	hasSeed := e.SecretKey != "" || e.KeystorePath != ""
+
+	if e.SignerCommand == "" {
+		if e.SignerPublicKey != "" {
+			return fmt.Errorf(
+				"%s is set but %s is not; a public key alone cannot sign",
+				EnvSignerPublicKey, EnvSignerCommand)
+		}
+		return nil
+	}
+
+	if hasSeed {
+		return fmt.Errorf(
+			"%s cannot be combined with %s or %s; choose one key source",
+			EnvSignerCommand, EnvSecretKey, EnvKeystorePath)
+	}
+	if e.SignerPublicKey == "" {
+		return fmt.Errorf(
+			"%s requires %s, the G... address the command signs for",
+			EnvSignerCommand, EnvSignerPublicKey)
+	}
+	return nil
+}
+
 // HasSigningKey reports whether a signing key source is configured. Read-only
 // commands use it to give a clear error instead of failing deeper in the stack.
 func (e Env) HasSigningKey() bool {
-	return e.SecretKey != "" || e.KeystorePath != ""
+	return e.SecretKey != "" || e.KeystorePath != "" || e.SignerCommand != ""
+}
+
+// MaxContractSizeBytes returns the configured contract WASM size limit, or def
+// when no override is set.
+func (e Env) MaxContractSizeBytes(def int) (int, error) {
+	if e.MaxContractSize == "" {
+		return def, nil
+	}
+
+	n, err := strconv.Atoi(e.MaxContractSize)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a whole number of bytes, got %q", EnvMaxContractSize, e.MaxContractSize)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("%s must be positive, got %d", EnvMaxContractSize, n)
+	}
+	return n, nil
 }
 
 // Redacted returns a copy safe to print or log: every secret is replaced with a
@@ -326,17 +387,20 @@ func (e Env) Redacted() map[string]string {
 	return map[string]string{
 		EnvDatabaseURL:           redact(e.DatabaseURL),
 		EnvSecretKey:             redact(e.SecretKey),
-		EnvKeystorePath:          e.KeystorePath, // a path is not itself a secret
-		EnvAllowInsecureKeystore: fmt.Sprintf("%t", e.AllowInsecureKeystore),
+		EnvKeystorePath:          e.KeystorePath,          // a path is not itself a secret
+		EnvSignerCommand:         redact(e.SignerCommand), // arguments may embed credentials
+		EnvSignerPublicKey:       e.SignerPublicKey,       // a public key is not a secret
+		EnvMaxContractSize:       e.MaxContractSize,
 		EnvAPIToken:              redact(e.APIToken),
 		EnvAPITokens:             redact(e.APITokens),
 		EnvAPIAddr:               e.ListenAddr(),
+		EnvLogFormat:             e.LogFormat,
+		EnvAllowInsecureKeystore: fmt.Sprintf("%t", e.AllowInsecureKeystore),
 		EnvAPIRateLimit:          orDefault(e.APIRateLimit, "(default)"),
 		EnvAPIRateBurst:          orDefault(e.APIRateBurst, "(default)"),
 		EnvAPITrustProxy:         orDefault(e.APITrustProxy, "false"),
 		EnvTLSCert:               e.TLSCert, // a path is not itself a secret
 		EnvTLSKey:                e.TLSKey,
-		EnvLogFormat:             e.LogFormat,
 	}
 }
 

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -52,6 +53,22 @@ func (h *handlers) deploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	async, err := asyncRequested(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if async {
+		h.submitJob(w, jobSpec{
+			alias:   req.Alias,
+			network: req.Network,
+			run: func(ctx context.Context) (any, error) {
+				return h.svc.Deploy(ctx, req)
+			},
+		})
+		return
+	}
+
 	result, err := h.svc.Deploy(r.Context(), req)
 	if err != nil {
 		h.log.Error("deploy failed", "alias", req.Alias, "network", req.Network, "error", err)
@@ -79,6 +96,22 @@ func (h *handlers) upgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	async, err := asyncRequested(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if async {
+		h.submitJob(w, jobSpec{
+			alias:   req.Alias,
+			network: req.Network,
+			run: func(ctx context.Context) (any, error) {
+				return h.svc.Upgrade(ctx, req)
+			},
+		})
+		return
+	}
+
 	result, err := h.svc.Upgrade(r.Context(), req)
 	if err != nil {
 		h.log.Error("upgrade failed", "alias", req.Alias, "network", req.Network, "error", err)
@@ -86,6 +119,47 @@ func (h *handlers) upgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+// asyncRequested reports whether the caller asked for a background job via
+// ?async=true. Any other non-empty value is an error rather than a silent
+// synchronous deploy: a client that meant to go async must not block for
+// minutes because of a typo.
+func asyncRequested(r *http.Request) (bool, error) {
+	raw := r.URL.Query().Get("async")
+	if raw == "" {
+		return false, nil
+	}
+	async, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("invalid async value %q: expected true or false", raw)
+	}
+	return async, nil
+}
+
+// submitJob starts a background job and returns 202 immediately. The Location
+// header points at the URL that reports its progress.
+func (h *handlers) submitJob(w http.ResponseWriter, spec jobSpec) {
+	job, err := h.jobs.submit(spec)
+	if err != nil {
+		h.log.Error("could not create async job", "alias", spec.alias, "error", err)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	w.Header().Set("Location", "/v1/jobs/"+job.ID)
+	writeJSON(w, http.StatusAccepted, job)
+}
+
+// job handles GET /v1/jobs/{id}.
+func (h *handlers) job(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	job, ok := h.jobs.get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("job %s not found", id))
+		return
+	}
+	writeJSON(w, http.StatusOK, job)
 }
 
 // listContractsResponse wraps the list so the payload can gain fields later

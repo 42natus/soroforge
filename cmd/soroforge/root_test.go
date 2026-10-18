@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/soroworks/soroforge/internal/config"
+	"github.com/stellar/go-stellar-sdk/keypair"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -108,4 +109,38 @@ func TestSetupLoggingUnknownLevelRejected(t *testing.T) {
 
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "debug")
+}
+
+func TestBuildSignerUsesTheExternalCommand(t *testing.T) {
+	full := keypair.MustRandom()
+
+	signer, err := buildSigner(&config.Config{Env: config.Env{
+		SignerCommand:   "/usr/local/bin/sign",
+		SignerPublicKey: full.Address(),
+	}}, true)
+	require.NoError(t, err)
+
+	// Building the signer must not run the command; that happens on Sign.
+	assert.Equal(t, full.Address(), signer.Address())
+}
+
+func TestBuildSignerRejectsMixedKeySources(t *testing.T) {
+	full := keypair.MustRandom()
+
+	_, err := buildSigner(&config.Config{Env: config.Env{
+		SignerCommand:   "/usr/local/bin/sign",
+		SignerPublicKey: full.Address(),
+		SecretKey:       full.Seed(),
+	}}, true)
+	assert.ErrorContains(t, err, "cannot be combined")
+}
+
+func TestBuildSignerWithoutAKey(t *testing.T) {
+	signer, err := buildSigner(&config.Config{}, false)
+	require.NoError(t, err)
+	assert.Nil(t, signer)
+
+	_, err = buildSigner(&config.Config{}, true)
+	assert.ErrorContains(t, err, "no signing key configured")
+	assert.ErrorContains(t, err, config.EnvSignerCommand)
 }

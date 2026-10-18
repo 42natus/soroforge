@@ -13,12 +13,13 @@ import (
 
 // UpgradeRequest asks for a tracked contract's bytecode to be replaced.
 type UpgradeRequest struct {
-	Alias     string `json:"alias"`
-	Network   string `json:"network,omitempty"`
-	Notes     string `json:"notes,omitempty"`
-	DryRun    bool   `json:"dry_run,omitempty"`
-	GitCommit string `json:"git_commit,omitempty"`
-	WasmHash  string `json:"wasm_hash,omitempty"`
+	Alias       string `json:"alias"`
+	Network     string `json:"network,omitempty"`
+	Notes       string `json:"notes,omitempty"`
+	DryRun      bool   `json:"dry_run,omitempty"`
+	GitCommit   string `json:"git_commit,omitempty"`
+	WasmHash    string `json:"wasm_hash,omitempty"`
+	RequireSpec bool   `json:"require_spec,omitempty"`
 }
 
 // UpgradeResult describes a completed or simulated upgrade.
@@ -47,6 +48,10 @@ type UpgradeResult struct {
 	UpgradeEnvelopeXDR string `json:"upgrade_envelope_xdr,omitempty"`
 
 	UploadSkipped bool `json:"upload_skipped,omitempty"`
+
+	// Warnings lists non-fatal problems found in the local artifact. It is empty
+	// for a clean upgrade, and populated in --json output too.
+	Warnings []string `json:"warnings,omitempty"`
 
 	// NoChange reports that the new bytecode is identical to what is already
 	// live, so no upgrade was performed.
@@ -146,6 +151,7 @@ func (s *Service) Upgrade(ctx context.Context, req UpgradeRequest) (*UpgradeResu
 		wasmHash    xdr.Hash
 		wasmHashHex string
 		wasm        []byte
+		warnings    []string
 	)
 
 	if req.WasmHash != "" {
@@ -165,6 +171,10 @@ func (s *Service) Upgrade(ctx context.Context, req UpgradeRequest) (*UpgradeResu
 		}
 	} else {
 		wasm, err = s.readWasm(r.Contract)
+		if err != nil {
+			return nil, err
+		}
+		warnings, err = s.checkWasm(wasm, req.RequireSpec)
 		if err != nil {
 			return nil, err
 		}
@@ -191,6 +201,7 @@ func (s *Service) Upgrade(ctx context.Context, req UpgradeRequest) (*UpgradeResu
 		Deployer:         signer.Address(),
 		UpgradeFunc:      upgradeFunc,
 		DryRun:           req.DryRun,
+		Warnings:         warnings,
 	}
 
 	// Compare against the ledger rather than the database. If someone upgraded

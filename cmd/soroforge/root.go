@@ -48,7 +48,10 @@ Configuration lives in soroforge.yaml. Secrets come from the environment:
   SOROFORGE_SECRET_KEY     deployer secret seed (S...), or
   SOROFORGE_KEYSTORE_PATH  path to a file containing the seed
 
-The secret key is never logged, stored, or printed. See the README security notes.`,
+To keep the key outside this process, set SOROFORGE_SIGNER_COMMAND to a signing
+executable (for an HSM or KMS) and SOROFORGE_SIGNER_PUBLIC_KEY to the G...
+address it signs for. The secret key is never logged, stored, or printed. See
+the README security notes.`,
 		SilenceUsage: true,
 		// Errors are printed once here rather than by both cobra and main.
 		SilenceErrors: false,
@@ -210,11 +213,18 @@ func newApp(ctx context.Context, opts appOptions) (*app, error) {
 		return nil, err
 	}
 
+	maxContractSize, err := cfg.Env.MaxContractSizeBytes(stellar.DefaultMaxContractSize)
+	if err != nil {
+		_ = a.Close()
+		return nil, err
+	}
+
 	service, err := deploy.New(deploy.Options{
-		Config: cfg,
-		Store:  a.store,
-		Signer: signer,
-		Log:    slog.Default(),
+		Config:          cfg,
+		Store:           a.store,
+		Signer:          signer,
+		MaxContractSize: maxContractSize,
+		Log:             slog.Default(),
 	})
 	if err != nil {
 		_ = a.Close()
@@ -236,12 +246,32 @@ func loadEnvOnly() config.Env { return config.LoadEnv() }
 // anywhere else. Only the derived public address is logged, and only at debug
 // level, so that operators can confirm which key was used without the value
 // appearing anywhere.
+//
+// An external signer command takes precedence over seed sources because
+// Env.ValidateSigningConfig rejects configuring both, so a key file on a
+// workstation cannot silently sign a deploy that was meant for an HSM.
 func buildSigner(cfg *config.Config, required bool) (stellar.Signer, error) {
+	if err := cfg.Env.ValidateSigningConfig(); err != nil {
+		return nil, err
+	}
+
+	if cfg.Env.SignerCommand != "" {
+		signer, err := stellar.NewCommandSigner(stellar.CommandSignerOptions{
+			Command: cfg.Env.SignerCommand,
+			Address: cfg.Env.SignerPublicKey,
+		})
+		if err != nil {
+			return nil, err
+		}
+		slog.Debug("configured external signer", "address", signer.Address())
+		return signer, nil
+	}
+
 	if !cfg.Env.HasSigningKey() {
 		if required {
 			return nil, fmt.Errorf(
-				"no signing key configured: set %s or %s (see README security notes)",
-				config.EnvSecretKey, config.EnvKeystorePath)
+				"no signing key configured: set %s or %s, or %s with %s (see README security notes)",
+				config.EnvSecretKey, config.EnvKeystorePath, config.EnvSignerCommand, config.EnvSignerPublicKey)
 		}
 		return nil, nil
 	}
