@@ -199,6 +199,7 @@ networks:
     rpc_url: https://soroban-testnet.stellar.org
     passphrase: "Test SDF Network ; September 2015"
     sorovault_url: http://localhost:8080   # optional
+    explorer_url: https://stellar.expert/explorer/testnet  # optional
 
 contracts:
   counter:
@@ -215,6 +216,12 @@ silently defaulted one could sign a mainnet deploy with testnet assumptions.
 
 There is **no public SDF-hosted mainnet RPC**. Point `mainnet` at a provider you
 trust or at your own node.
+
+**`explorer_url`** is an optional block-explorer base URL. SoroForge appends
+`/contract/{contract_id}` and `/tx/{transaction_hash}` for deploy, upgrade, and
+history output. For example, set it to
+`https://stellar.expert/explorer/testnet`. With no explorer URL, output remains
+unchanged.
 
 **`sorovault_url`** registers every confirmed deploy and upgrade with a
 [SoroVault](https://github.com/soroworks/sorovault) registry serving that
@@ -368,6 +375,7 @@ of an error printed mid-prompt.
 | Command | Description |
 |---|---|
 | `init` | Write a starter `soroforge.yaml` for the contracts built under `target/`. |
+| `config check` | Check config and WASM files; `--offline` skips RPC checks. |
 | `deploy <alias>` | Upload WASM, instantiate the contract, record it. |
 | `upgrade <alias>` | Upload new WASM and invoke the contract's upgrade entrypoint. |
 | `upload <alias>` | Install WASM on-chain without deploying or upgrading; prints the hash for a governance proposal. |
@@ -396,6 +404,11 @@ deploys, with a warning that SoroVault cannot catalogue it, client bindings
 cannot be generated, and SoroProbe cannot type its arguments. The warning is in
 `--json` output too; `--require-spec` turns it into an error. A structurally
 malformed WASM is reported before anything is simulated.
+
+`config check` checks that each configured WASM file exists and starts with the
+WebAssembly magic bytes, and that each RPC endpoint reports the configured
+network passphrase. It aggregates failures into one non-zero result. Pass
+`--offline` to skip RPC checks while still validating every artifact.
 
 **`--dry-run`** runs everything up to and including simulation and assembly,
 then stops. It prints the assembled envelopes and the resulting contract

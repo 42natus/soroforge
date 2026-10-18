@@ -27,6 +27,10 @@ type MockClient struct {
 	// Passphrase is returned by NetworkPassphrase.
 	Passphrase string
 
+	// NetworkInfoPassphrase and NetworkInfoErr configure NetworkInfo.
+	NetworkInfoPassphrase string
+	NetworkInfoErr        error
+
 	// Sequence is the sequence number LoadAccount reports.
 	Sequence int64
 
@@ -65,6 +69,7 @@ type MockClient struct {
 	// usable; NewMockClient sets a SUCCESS default.
 	AwaitResponse TxResult
 	AwaitErr      error
+	CloseErr      error
 
 	// Entries maps a base64 LedgerKey to the base64 LedgerEntryData returned
 	// for it. Keys absent from the map are reported as not found, which is how
@@ -76,9 +81,10 @@ type MockClient struct {
 	LoadAccountErr error
 
 	// Recorded calls, for assertions.
-	Simulated []string // unsigned envelopes passed to Simulate
-	Sent      []string // signed envelopes passed to Send
-	Awaited   []string // hashes passed to AwaitTransaction
+	Simulated  []string // unsigned envelopes passed to Simulate
+	Sent       []string // signed envelopes passed to Send
+	Awaited    []string // hashes passed to AwaitTransaction
+	CloseCalls int
 }
 
 var _ Client = (*MockClient)(nil)
@@ -103,6 +109,25 @@ func NewMockClient() *MockClient {
 
 // NetworkPassphrase implements Client.
 func (m *MockClient) NetworkPassphrase() string { return m.Passphrase }
+
+// NetworkInfo implements Client.
+func (m *MockClient) NetworkInfo(_ context.Context) (string, error) {
+	if m.NetworkInfoErr != nil {
+		return "", m.NetworkInfoErr
+	}
+	if m.NetworkInfoPassphrase != "" {
+		return m.NetworkInfoPassphrase, nil
+	}
+	return m.Passphrase, nil
+}
+
+// Close implements io.Closer for lifecycle tests.
+func (m *MockClient) Close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.CloseCalls++
+	return m.CloseErr
+}
 
 // LoadAccount implements Client.
 func (m *MockClient) LoadAccount(_ context.Context, address string) (txnbuild.Account, error) {

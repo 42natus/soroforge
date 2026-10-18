@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -69,6 +70,10 @@ type Network struct {
 	// RPCURL is the Stellar RPC endpoint, e.g. https://soroban-testnet.stellar.org.
 	RPCURL string `yaml:"rpc_url"`
 
+	// ExplorerURL is the optional base URL of a block explorer for this
+	// network, e.g. https://stellar.expert/explorer/testnet.
+	ExplorerURL string `yaml:"explorer_url"`
+
 	// Passphrase is the network passphrase, e.g. "Test SDF Network ; September 2015".
 	Passphrase string `yaml:"passphrase"`
 
@@ -104,6 +109,25 @@ func (w *Webhook) UnmarshalYAML(node *yaml.Node) error {
 		return nil
 	}
 	return fmt.Errorf("webhook: expected a URL string or {url, secret} mapping")
+}
+
+// ContractExplorerURL returns the explorer page for contractID, or an empty
+// string when no explorer is configured.
+func (n Network) ContractExplorerURL(contractID string) string {
+	return explorerURL(n.ExplorerURL, "contract", contractID)
+}
+
+// TransactionExplorerURL returns the explorer page for hash, or an empty
+// string when no explorer is configured.
+func (n Network) TransactionExplorerURL(hash string) string {
+	return explorerURL(n.ExplorerURL, "tx", hash)
+}
+
+func explorerURL(base, kind, value string) string {
+	if base == "" || value == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s/%s/%s", strings.TrimRight(base, "/"), kind, value)
 }
 
 // Contract is a contract SoroForge manages.

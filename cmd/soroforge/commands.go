@@ -654,7 +654,7 @@ Endpoints:
 				srv.TLSConfig = tlsCfg
 			}
 
-			return serve(cmd.Context(), srv, certFile != "")
+			return serve(cmd.Context(), srv, certFile != "", a.service)
 		},
 	}
 

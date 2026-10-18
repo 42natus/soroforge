@@ -15,11 +15,17 @@ import (
 	"time"
 
 	"github.com/soroworks/soroforge/internal/config"
+	"github.com/soroworks/soroforge/internal/deploy"
 )
 
 // serve runs the HTTP server until interrupted, then shuts it down gracefully
-// so an in-flight deploy is not cut off mid-submission.
-func serve(ctx context.Context, srv *http.Server, useTLS bool) error {
+// so an in-flight deploy is not cut off mid-submission. The service is closed
+// on the way out, releasing its cached RPC clients.
+func serve(ctx context.Context, srv *http.Server, useTLS bool, service *deploy.Service) (serveErr error) {
+	defer func() {
+		serveErr = errors.Join(serveErr, service.Close())
+	}()
+
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

@@ -2,8 +2,10 @@ package deploy_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 
+	"github.com/soroworks/soroforge/internal/config"
 	"github.com/soroworks/soroforge/internal/deploy"
 	"github.com/soroworks/soroforge/internal/stellar"
 	"github.com/soroworks/soroforge/internal/store"
@@ -206,6 +208,58 @@ func TestNewServiceValidatesRequiredDependencies(t *testing.T) {
 
 	_, err = deploy.New(deploy.Options{Config: newHarness(t, harnessOptions{}).svc.Config()})
 	assert.ErrorContains(t, err, "store is required")
+}
+
+func TestServiceCachesClientsPerNetworkConcurrentlyAndClosesThem(t *testing.T) {
+	h := newHarness(t, harnessOptions{noSigner: true})
+	var mu sync.Mutex
+	counts := map[string]int{}
+	clients := map[string]*stellar.MockClient{}
+
+	svc, err := deploy.New(deploy.Options{
+		Config: h.cfg,
+		Store:  h.store,
+		Clients: func(name string, _ config.Network) (stellar.Client, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			counts[name]++
+			client := stellar.NewMockClient()
+			clients[name] = client
+			return client, nil
+		},
+	})
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 40)
+	for _, network := range []string{"testnet", "mainnet"} {
+		for range 20 {
+			wg.Add(1)
+			go func(network string) {
+				defer wg.Done()
+				_, err := svc.Status(context.Background(), deploy.StatusRequest{
+					Alias: "counter", Network: network,
+				})
+				if err != nil {
+					errs <- err
+				}
+			}(network)
+		}
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	assert.Equal(t, map[string]int{"testnet": 1, "mainnet": 1}, counts)
+	require.NoError(t, svc.Close())
+	require.NoError(t, svc.Close(), "closing is idempotent")
+	assert.Equal(t, 1, clients["testnet"].CloseCalls)
+	assert.Equal(t, 1, clients["mainnet"].CloseCalls)
+
+	_, err = svc.Status(context.Background(), deploy.StatusRequest{Alias: "counter"})
+	assert.ErrorContains(t, err, "service is closed")
 }
 
 func TestStatusAllChecksEveryTrackedContract(t *testing.T) {

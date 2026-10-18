@@ -83,6 +83,15 @@ func (c *RPCClient) Close() error { return c.rpc.Close() }
 // NetworkPassphrase implements Client.
 func (c *RPCClient) NetworkPassphrase() string { return c.passphrase }
 
+// NetworkInfo implements Client.
+func (c *RPCClient) NetworkInfo(ctx context.Context) (string, error) {
+	info, err := c.rpc.GetNetwork(ctx)
+	if err != nil {
+		return "", fmt.Errorf("getNetwork: %w", err)
+	}
+	return info.Passphrase, nil
+}
+
 // LoadAccount implements Client.
 func (c *RPCClient) LoadAccount(ctx context.Context, address string) (txnbuild.Account, error) {
 	account, err := c.rpc.LoadAccount(ctx, address)

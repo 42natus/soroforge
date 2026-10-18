@@ -85,6 +85,11 @@ type Deployment struct {
 	TxHash string `json:"tx_hash,omitempty"`
 	Ledger uint32 `json:"ledger,omitempty"`
 
+	// ContractURL and TxURL are explorer links filled in for display when the
+	// network configures an explorer. They are derived, never stored.
+	ContractURL string `json:"contract_url,omitempty"`
+	TxURL       string `json:"tx_url,omitempty"`
+
 	// GitCommit is the git commit hash the deploy/upgrade was recorded from.
 	// Empty string when run outside a git repository or when detection fails.
 	GitCommit string `json:"git_commit"`
