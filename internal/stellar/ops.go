@@ -113,6 +113,45 @@ func CreateContractOp(
 	}, nil
 }
 
+// ParseAsset parses a classic asset string ("native" or "CODE:ISSUER") into an xdr.Asset.
+func ParseAsset(s string) (xdr.Asset, error) {
+	parsed, err := txnbuild.ParseAssetString(strings.TrimSpace(s))
+	if err != nil {
+		return xdr.Asset{}, fmt.Errorf("invalid asset %q: %w", s, err)
+	}
+	return parsed.ToXDR()
+}
+
+// ContractIDFromAsset returns the deterministic C... strkey contract address
+// for an asset's Stellar Asset Contract on the given network.
+func ContractIDFromAsset(asset xdr.Asset, networkPassphrase string) (string, error) {
+	raw, err := asset.ContractID(networkPassphrase)
+	if err != nil {
+		return "", fmt.Errorf("derive asset contract id: %w", err)
+	}
+	return strkey.Encode(strkey.VersionByteContract, raw[:])
+}
+
+// CreateSacOp builds the operation that deploys the built-in Stellar Asset
+// Contract (SAC) for a classic asset.
+func CreateSacOp(asset xdr.Asset, source string) *txnbuild.InvokeHostFunction {
+	return &txnbuild.InvokeHostFunction{
+		HostFunction: xdr.HostFunction{
+			Type: xdr.HostFunctionTypeHostFunctionTypeCreateContract,
+			CreateContract: &xdr.CreateContractArgs{
+				ContractIdPreimage: xdr.ContractIdPreimage{
+					Type:      xdr.ContractIdPreimageTypeContractIdPreimageFromAsset,
+					FromAsset: &asset,
+				},
+				Executable: xdr.ContractExecutable{
+					Type: xdr.ContractExecutableTypeContractExecutableStellarAsset,
+				},
+			},
+		},
+		SourceAccount: source,
+	}
+}
+
 // InvokeOp builds the operation that calls a function on a deployed contract.
 // SoroForge uses it for upgrades; it is exported because it is the obvious
 // building block for a future `soroforge invoke`.

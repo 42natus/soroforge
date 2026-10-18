@@ -14,6 +14,7 @@ import (
 	"github.com/soroworks/soroforge/internal/stellar"
 	"github.com/soroworks/soroforge/internal/store"
 	"github.com/stellar/go-stellar-sdk/txnbuild"
+	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
 func gitMetadata(dir, override string) (string, bool) {
@@ -141,6 +142,10 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 	signer, err := s.requireSigner()
 	if err != nil {
 		return nil, err
+	}
+
+	if r.Contract.IsSAC() {
+		return s.deploySAC(ctx, r, signer, req)
 	}
 
 	wasm, err := s.readWasm(r.Contract)
@@ -536,6 +541,105 @@ func (s *Service) salt(c config.Contract) ([32]byte, error) {
 		return config.ParseSalt(c.Salt)
 	}
 	return stellar.NewSalt()
+}
+
+func (s *Service) deploySAC(
+	ctx context.Context,
+	r resolved,
+	signer stellar.Signer,
+	req DeployRequest,
+) (*DeployResult, error) {
+	asset, err := stellar.ParseAsset(r.Contract.Asset)
+	if err != nil {
+		return nil, err
+	}
+
+	contractID, err := stellar.ContractIDFromAsset(asset, r.Network.Passphrase)
+	if err != nil {
+		return nil, err
+	}
+
+	log := s.log.With(
+		"alias", r.Alias,
+		"network", r.NetworkName,
+		"asset", r.Contract.Asset,
+		"contract_id", contractID,
+		"dry_run", req.DryRun,
+	)
+	log.Info("deploying stellar asset contract", "deployer", signer.Address())
+
+	result := &DeployResult{
+		Alias:         r.Alias,
+		Network:       r.NetworkName,
+		ContractID:    contractID,
+		WasmHash:      "stellar_asset",
+		Deployer:      signer.Address(),
+		DryRun:        req.DryRun,
+		UploadSkipped: true,
+	}
+
+	// Check if the SAC is already deployed on-chain.
+	key, err := stellar.InstanceLedgerKey(contractID)
+	if err != nil {
+		return nil, err
+	}
+	encodedKey, err := xdr.MarshalBase64(key)
+	if err != nil {
+		return nil, fmt.Errorf("encode instance ledger key: %w", err)
+	}
+
+	entries, err := r.Client.LedgerEntries(ctx, []string{encodedKey})
+	if err != nil {
+		return nil, fmt.Errorf("check if sac is deployed: %w", err)
+	}
+
+	alreadyDeployed := len(entries) > 0
+
+	if !alreadyDeployed {
+		createOp := stellar.CreateSacOp(asset, signer.Address())
+		create, err := s.runTransaction(ctx, r, createOp, "create", req.DryRun)
+		if err != nil {
+			return nil, fmt.Errorf("create stellar asset contract: %w", err)
+		}
+		result.CreateTxHash = create.Hash
+		result.CreateEnvelopeXDR = create.EnvelopeXDR
+		result.Ledger = create.Ledger
+	}
+
+	if req.DryRun {
+		log.Info("dry run complete, nothing submitted or recorded", "contract_id", contractID)
+		return result, nil
+	}
+
+	if alreadyDeployed {
+		log.Info("stellar asset contract already deployed on-chain, recording existing contract", "contract_id", contractID)
+	} else {
+		log.Info("stellar asset contract created", "contract_id", contractID, "tx_hash", result.CreateTxHash)
+	}
+
+	notes := "asset: " + r.Contract.Asset
+	if req.Notes != "" {
+		notes = notes + "; " + req.Notes
+	}
+
+	deployment, err := s.record(ctx, store.Deployment{
+		Alias:          r.Alias,
+		Network:        r.NetworkName,
+		ContractID:     contractID,
+		WasmHash:       "stellar_asset",
+		Action:         store.ActionDeploy,
+		DeployerPubkey: signer.Address(),
+		TxHash:         result.CreateTxHash,
+		Ledger:         result.Ledger,
+		Notes:          notes,
+	})
+	if err != nil {
+		return nil, err
+	}
+	result.Deployment = deployment
+	result.Catalog = s.publish(ctx, r, contractID, log)
+
+	return result, nil
 }
 
 // checkTargetFree derives the address a fixed-salt deploy would occupy and

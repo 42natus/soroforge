@@ -142,6 +142,10 @@ func (s *Service) Upgrade(ctx context.Context, req UpgradeRequest) (*UpgradeResu
 		return nil, err
 	}
 
+	if r.Contract.IsSAC() {
+		return nil, fmt.Errorf("cannot upgrade %s: Stellar Asset Contracts cannot be upgraded", r.Alias)
+	}
+
 	// Upgrading requires knowing which contract to upgrade, and that is exactly
 	// what the tracked history is for. An untracked contract is a deploy, not
 	// an upgrade.
@@ -153,6 +157,10 @@ func (s *Service) Upgrade(ctx context.Context, req UpgradeRequest) (*UpgradeResu
 				r.Alias, r.NetworkName, r.Alias)
 		}
 		return nil, err
+	}
+
+	if tracked.CurrentWasmHash == "stellar_asset" {
+		return nil, fmt.Errorf("cannot upgrade %s: Stellar Asset Contracts cannot be upgraded", r.Alias)
 	}
 
 	var (
@@ -218,6 +226,10 @@ func (s *Service) Upgrade(ctx context.Context, req UpgradeRequest) (*UpgradeResu
 	// answer to "is this a no-op?" comes from the chain.
 	liveHash, err := stellar.OnChainWasmHash(ctx, r.Client, tracked.ContractID)
 	if err != nil {
+		var sacErr *stellar.ErrStellarAssetContract
+		if errors.As(err, &sacErr) {
+			return nil, fmt.Errorf("cannot upgrade %s: contract is a Stellar Asset Contract", r.Alias)
+		}
 		return nil, fmt.Errorf("read current on-chain wasm hash: %w", err)
 	}
 	result.PreviousWasmHash = stellar.HashHex(liveHash)

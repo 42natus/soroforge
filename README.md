@@ -283,6 +283,8 @@ contract already exists there and stops with an actionable message — naming th
 address and suggesting `soroforge upgrade` or a different salt — rather than
 paying for an upload and failing later in simulation.
 
+**Stellar Asset Contracts.** Projects using classic Stellar assets can declare `asset: CODE:ISSUER` or `asset: native` instead of `wasm:`. SoroForge deterministically derives the SAC contract ID, deploys the contract (or records the existing one if already live on-chain), and tracks its drift status. Because SACs are protocol-native contracts without uploaded bytecode, `soroforge upgrade` refuses them clearly.
+
 **`networks`** overrides `constructor_args` and `salt` for one network: the
 per-network value wins when that network is deployed to, and the contract-level
 value is the default everywhere else (`wasm` and `upgrade_fn` are not
@@ -620,6 +622,22 @@ name:
 The bearer token value, request bodies, and key material are never logged.
 `/health` is logged at `debug` only, so a liveness probe polling every second
 does not flood the log.
+
+### Kubernetes & Helm
+
+A Helm chart for deploying `soroforge serve` is provided under [`deploy/helm/soroforge`](deploy/helm/soroforge).
+
+- Runs database migrations as a pre-install/pre-upgrade hook (`soroforge migrate up`).
+- Executes as non-root (`runAsNonRoot: true`, UID 65532) with a read-only root filesystem and an `emptyDir` on `/tmp`.
+- Service defaults to `ClusterIP`.
+- Reads `DATABASE_URL`, `SOROFORGE_SECRET_KEY`, and API tokens from existing Kubernetes Secrets (never plain values).
+- Mounts `soroforge.yaml` from a ConfigMap.
+- Configures `/health` (liveness) and `/ready` (readiness) probes.
+
+```bash
+helm install soroforge deploy/helm/soroforge \
+  --set secrets.existingSecret=soroforge-secrets
+```
 
 ### Async jobs
 

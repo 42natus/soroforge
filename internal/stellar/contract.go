@@ -158,6 +158,16 @@ func (e *ErrContractNotFound) Error() string {
 	return fmt.Sprintf("contract %s has no instance entry on this network", e.ContractID)
 }
 
+// ErrStellarAssetContract reports that a contract is a Stellar Asset Contract
+// and has no uploaded bytecode or WASM hash.
+type ErrStellarAssetContract struct {
+	ContractID string
+}
+
+func (e *ErrStellarAssetContract) Error() string {
+	return fmt.Sprintf("contract %s is a Stellar Asset Contract and has no WASM hash", e.ContractID)
+}
+
 // OnChainWasmHash reports the WASM hash a deployed contract is currently
 // running, read directly from the ledger.
 //
@@ -209,7 +219,7 @@ func OnChainWasmHash(ctx context.Context, client Client, contractID string) (xdr
 	case xdr.ContractExecutableTypeContractExecutableStellarAsset:
 		// Stellar Asset Contracts are built into the protocol and have no
 		// uploaded bytecode, so there is nothing to compare against.
-		return zero, fmt.Errorf("contract %s is a Stellar Asset Contract and has no WASM hash", contractID)
+		return zero, &ErrStellarAssetContract{ContractID: contractID}
 
 	default:
 		return zero, fmt.Errorf("contract %s has an unsupported executable type %s",

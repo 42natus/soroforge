@@ -335,3 +335,70 @@ func TestStatusAllRejectsUnknownNetwork(t *testing.T) {
 	_, err := h.svc.StatusAll(context.Background(), "nowhere")
 	assert.Error(t, err)
 }
+
+func TestStatusSACInSync(t *testing.T) {
+	h := newHarness(t, harnessOptions{configBody: `
+version: 1
+default_network: testnet
+networks:
+  testnet:
+    rpc_url: https://rpc.example.org
+    passphrase: "Test SDF Network ; September 2015"
+contracts:
+  xlm:
+    asset: native
+`})
+	ctx := context.Background()
+
+	sacID := otherContractID(t, 10)
+	_, err := h.store.UpsertContract(ctx, store.Contract{
+		Alias:           "xlm",
+		Network:         "testnet",
+		ContractID:      sacID,
+		CurrentWasmHash: "stellar_asset",
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, h.client.SetSACInstance(sacID))
+
+	status, err := h.svc.Status(ctx, deploy.StatusRequest{Alias: "xlm"})
+	require.NoError(t, err)
+
+	assert.Equal(t, deploy.StateInSync, status.State)
+	assert.Equal(t, "stellar_asset", status.ExpectedWasmHash)
+	assert.Equal(t, "stellar_asset", status.ActualWasmHash)
+	assert.True(t, status.InSync())
+}
+
+func TestStatusSACDrift(t *testing.T) {
+	h := newHarness(t, harnessOptions{configBody: `
+version: 1
+default_network: testnet
+networks:
+  testnet:
+    rpc_url: https://rpc.example.org
+    passphrase: "Test SDF Network ; September 2015"
+contracts:
+  xlm:
+    asset: native
+`})
+	ctx := context.Background()
+
+	sacID := otherContractID(t, 10)
+	_, err := h.store.UpsertContract(ctx, store.Contract{
+		Alias:           "xlm",
+		Network:         "testnet",
+		ContractID:      sacID,
+		CurrentWasmHash: "some_old_wasm_hash",
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, h.client.SetSACInstance(sacID))
+
+	status, err := h.svc.Status(ctx, deploy.StatusRequest{Alias: "xlm"})
+	require.NoError(t, err)
+
+	assert.Equal(t, deploy.StateDrift, status.State)
+	assert.Equal(t, "stellar_asset", status.ActualWasmHash)
+	assert.False(t, status.InSync())
+}

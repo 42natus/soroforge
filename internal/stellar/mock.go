@@ -285,6 +285,44 @@ func (m *MockClient) SetContractInstance(contractID string, wasmHash xdr.Hash) e
 	return nil
 }
 
+// SetSACInstance makes contractID resolve on-chain to a Stellar Asset Contract instance.
+func (m *MockClient) SetSACInstance(contractID string) error {
+	key, err := InstanceLedgerKey(contractID)
+	if err != nil {
+		return err
+	}
+	encodedKey, err := xdr.MarshalBase64(key)
+	if err != nil {
+		return err
+	}
+
+	entry := xdr.LedgerEntryData{
+		Type: xdr.LedgerEntryTypeContractData,
+		ContractData: &xdr.ContractDataEntry{
+			Contract:   mustContractAddress(contractID),
+			Key:        xdr.ScVal{Type: xdr.ScValTypeScvLedgerKeyContractInstance},
+			Durability: xdr.ContractDataDurabilityPersistent,
+			Val: xdr.ScVal{
+				Type: xdr.ScValTypeScvContractInstance,
+				Instance: &xdr.ScContractInstance{
+					Executable: xdr.ContractExecutable{
+						Type: xdr.ContractExecutableTypeContractExecutableStellarAsset,
+					},
+				},
+			},
+		},
+	}
+	encodedEntry, err := xdr.MarshalBase64(entry)
+	if err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Entries[encodedKey] = encodedEntry
+	return nil
+}
+
 // SetWasmUploaded marks bytecode as already present on-chain, so that upload
 // steps are skipped.
 func (m *MockClient) SetWasmUploaded(wasmHash xdr.Hash) error {

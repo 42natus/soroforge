@@ -420,3 +420,21 @@ func TestUpgradeRetriesUntilTheNewHashIsVisible(t *testing.T) {
 	require.Len(t, history, 1)
 	assert.Equal(t, stellar.HashHex(h.wasmHash), history[0].WasmHash)
 }
+
+func TestUpgradeRefusesStellarAssetContract(t *testing.T) {
+	h := newHarness(t, harnessOptions{configBody: `
+version: 1
+default_network: testnet
+networks:
+  testnet:
+    rpc_url: https://rpc.example.org
+    passphrase: "Test SDF Network ; September 2015"
+contracts:
+  xlm:
+    asset: native
+`})
+
+	_, err := h.svc.Upgrade(context.Background(), deploy.UpgradeRequest{Alias: "xlm"})
+	assert.ErrorContains(t, err, "cannot upgrade xlm")
+	assert.ErrorContains(t, err, "Stellar Asset Contracts cannot be upgraded")
+}
