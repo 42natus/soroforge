@@ -189,3 +189,17 @@ func ResourceFee(sim SimulateResult) (int64, error) {
 	}
 	return int64(data.ResourceFee), nil
 }
+
+// StroopsPerXLM is the number of stroops in one lumen: 10^7.
+const StroopsPerXLM int64 = 10_000_000
+
+// StroopsToXLM renders a stroop amount in XLM with all seven decimal places, so
+// that fees smaller than a tenth of a lumen do not print as zero.
+func StroopsToXLM(stroops int64) string {
+	sign := ""
+	if stroops < 0 {
+		sign = "-"
+		stroops = -stroops
+	}
+	return fmt.Sprintf("%s%d.%07d", sign, stroops/StroopsPerXLM, stroops%StroopsPerXLM)
+}

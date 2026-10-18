@@ -83,6 +83,10 @@ type DeployResult struct {
 	// DryRun reports whether anything was actually submitted.
 	DryRun bool `json:"dry_run"`
 
+	// EstimatedFees is what a dry run estimates each transaction would cost.
+	// Nil unless DryRun is set.
+	EstimatedFees *DryRunFees `json:"estimated_fees,omitempty"`
+
 	// UploadEnvelopeXDR and CreateEnvelopeXDR are the assembled transaction
 	// envelopes. On a dry run these are the deliverable: they can be inspected,
 	// diffed, or submitted by another tool.
@@ -156,6 +160,22 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 		Warnings: warnings,
 	}
 
+	salt, err := s.salt(r.Contract)
+	if err != nil {
+		return nil, err
+	}
+
+	// A fixed salt makes the target address deterministic, so a collision can
+	// be caught before the bytecode upload is paid for. A random salt cannot
+	// collide in any way worth checking, so that path skips the lookup.
+	if r.Contract.Salt != "" {
+		if err := s.checkTargetFree(ctx, r, signer.Address(), salt); err != nil {
+			return nil, err
+		}
+	}
+
+	fees := &DryRunFees{}
+
 	// Step 1: upload the bytecode, unless it is already on-chain.
 	upload, skipped, err := s.uploadBytecode(ctx, r, signer, wasm, req.DryRun, log)
 	if err != nil {
@@ -167,6 +187,7 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 		result.UploadTxHash = upload.Hash
 		result.UploadTxURL = r.Network.TransactionExplorerURL(upload.Hash)
 		result.UploadEnvelopeXDR = upload.EnvelopeXDR
+		fees.Upload = &upload.Fee
 	}
 
 	// Step 2: instantiate a contract from the uploaded bytecode.
@@ -175,17 +196,12 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 		return nil, fmt.Errorf("constructor args for %s: %w", r.Alias, err)
 	}
 
-	salt, err := s.salt(r.Contract)
-	if err != nil {
-		return nil, err
-	}
-
 	createOp, err := stellar.CreateContractOp(wasmHash, signer.Address(), salt, args, signer.Address())
 	if err != nil {
 		return nil, err
 	}
 
-	create, err := s.runTransaction(ctx, r, createOp, req.DryRun)
+	create, err := s.runTransaction(ctx, r, createOp, "create", req.DryRun)
 	if err != nil {
 		return nil, fmt.Errorf("create contract: %w", err)
 	}
@@ -193,6 +209,8 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 	result.CreateTxURL = r.Network.TransactionExplorerURL(create.Hash)
 	result.CreateEnvelopeXDR = create.EnvelopeXDR
 	result.Ledger = create.Ledger
+	fees.Create = &create.Fee
+	fees.Total = fees.sum()
 
 	// The contract's address comes from the host function's return value, which
 	// simulation reports — so a dry run knows the address a real deploy would
@@ -219,12 +237,15 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 
 	if req.DryRun {
 		if initOp != nil {
-			initTx, err := s.runTransaction(ctx, r, initOp, true)
+			initTx, err := s.runTransaction(ctx, r, initOp, "init", true)
 			if err != nil {
 				return nil, fmt.Errorf("simulate initializer %s: %w", r.Contract.InitFunc, err)
 			}
 			result.InitEnvelopeXDR = initTx.EnvelopeXDR
+			fees.Init = &initTx.Fee
+			fees.Total = fees.sum()
 		}
+		result.EstimatedFees = fees
 		log.Info("dry run complete, nothing submitted or recorded", "contract_id", contractID)
 		return result, nil
 	}
@@ -234,7 +255,7 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 	gitCommit, dirty := gitMetadata(s.cfg.Dir(), req.GitCommit)
 
 	if initOp != nil {
-		initTx, err := s.runTransaction(ctx, r, initOp, false)
+		initTx, err := s.runTransaction(ctx, r, initOp, "init", false)
 		if err != nil {
 			// The contract is already live on-chain, so record it honestly even though initialization failed.
 			failNotes := req.Notes
@@ -379,4 +400,31 @@ func (s *Service) salt(c config.Contract) ([32]byte, error) {
 		return config.ParseSalt(c.Salt)
 	}
 	return stellar.NewSalt()
+}
+
+// checkTargetFree derives the address a fixed-salt deploy would occupy and
+// fails if a contract instance already lives there.
+//
+// Without this check the collision surfaces as an opaque simulation error for
+// the create transaction — after the upload has already been paid for. Doing it
+// first turns that into a clear, free error that names the address.
+func (s *Service) checkTargetFree(ctx context.Context, r resolved, deployer string, salt [32]byte) error {
+	address, err := stellar.ContractIDFromDeployer(r.Network.Passphrase, deployer, salt)
+	if err != nil {
+		return fmt.Errorf("derive target address for %s: %w", r.Alias, err)
+	}
+
+	occupied, err := stellar.ContractExists(ctx, r.Client, address)
+	if err != nil {
+		return fmt.Errorf("check whether %s is free: %w", address, err)
+	}
+	if occupied {
+		return fmt.Errorf(
+			"address %s for %s on %s is already occupied: use `soroforge upgrade %s` to update "+
+				"the existing contract, or configure a different salt for a new address",
+			address, r.Alias, r.NetworkName, r.Alias)
+	}
+
+	s.log.Debug("target address is free", "contract_id", address)
+	return nil
 }

@@ -206,6 +206,28 @@ func TestResourceFeeReadsAuthoritativeValue(t *testing.T) {
 	assert.Equal(t, int64(4242), fee)
 }
 
+func TestStroopsToXLM(t *testing.T) {
+	tests := map[string]struct {
+		stroops int64
+		want    string
+	}{
+		"zero":               {0, "0.0000000"},
+		"one stroop":         {1, "0.0000001"},
+		"min base fee":       {100, "0.0000100"},
+		"one lumen":          {10_000_000, "1.0000000"},
+		"typical fee":        {12_445, "0.0012445"},
+		"more than one XLM":  {25_000_000, "2.5000000"},
+		"large amount":       {123_456_789_012, "12345.6789012"},
+		"negative is signed": {-200, "-0.0000200"},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.want, StroopsToXLM(tc.stroops))
+		})
+	}
+}
+
 func TestAssembledTransactionIsSignableAndEncodable(t *testing.T) {
 	// The end product must be a real, signable envelope — not just a struct
 	// that passed field assertions.

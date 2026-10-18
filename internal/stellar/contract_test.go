@@ -2,9 +2,11 @@ package stellar
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"testing"
 
+	"github.com/stellar/go-stellar-sdk/keypair"
 	"github.com/stellar/go-stellar-sdk/xdr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -172,6 +174,52 @@ func TestInstanceAndCodeLedgerKeysDiffer(t *testing.T) {
 	assert.Equal(t, xdr.LedgerEntryTypeContractCode, codeKey.Type)
 	require.NotNil(t, codeKey.ContractCode)
 	assert.Equal(t, hash, codeKey.ContractCode.Hash)
+}
+
+func TestContractIDFromDeployerMatchesStellarDerivation(t *testing.T) {
+	// The expected value was derived independently with the JavaScript SDK
+	// (@stellar/stellar-base), so this pins the protocol derivation rather
+	// than restating the Go implementation. Getting it wrong would mean
+	// checking a different address than the one a deploy creates.
+	const (
+		seed     = "SCN4VT2ELMFTALLNPPJNCK6OGQEWLERZIMEPARTRVDXXL2IJAPWSXZQI"
+		saltHex  = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+		expected = "CCMSQAPY4AIPCZ65CLOM4VELIQZR73C7VS6RZQSRILB2EJZ644YHAEGC"
+	)
+
+	full, err := keypair.ParseFull(seed)
+	require.NoError(t, err)
+
+	rawSalt, err := hex.DecodeString(saltHex)
+	require.NoError(t, err)
+	var salt [32]byte
+	copy(salt[:], rawSalt)
+
+	got, err := ContractIDFromDeployer("Test SDF Network ; September 2015", full.Address(), salt)
+	require.NoError(t, err)
+	assert.Equal(t, expected, got)
+}
+
+func TestContractIDFromDeployerRejectsInvalidAddress(t *testing.T) {
+	_, err := ContractIDFromDeployer("Test SDF Network ; September 2015", "not-an-address", [32]byte{})
+	assert.ErrorContains(t, err, "deployer address")
+}
+
+func TestContractExistsDetectsPresenceAndAbsence(t *testing.T) {
+	// The deploy collision check turns on this lookup, so it must be right in
+	// both directions.
+	contractID := testContractID(t)
+	client := NewMockClient()
+
+	exists, err := ContractExists(context.Background(), client, contractID)
+	require.NoError(t, err)
+	assert.False(t, exists, "a contract with no instance entry must not be reported as occupied")
+
+	require.NoError(t, client.SetContractInstance(contractID, WasmHash([]byte("bytecode"))))
+
+	exists, err = ContractExists(context.Background(), client, contractID)
+	require.NoError(t, err)
+	assert.True(t, exists)
 }
 
 // ParseAccountAddressForTest builds an account ScAddress, used to prove that an

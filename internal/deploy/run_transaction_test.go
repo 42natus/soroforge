@@ -82,7 +82,7 @@ func TestRunTransactionStopsWhenTheAccountCannotBeLoaded(t *testing.T) {
 	_, err := svc.runTransaction(context.Background(),
 		resolved{Client: client},
 		stellar.UploadWasmOp([]byte(minimalWasm), signer.Address()),
-		false)
+		"upload", false)
 
 	require.Error(t, err)
 	assert.ErrorContains(t, err, signer.Address(),
@@ -110,7 +110,7 @@ func TestRunTransactionStopsWhenSigningFails(t *testing.T) {
 	_, err := svc.runTransaction(context.Background(),
 		resolved{Client: client},
 		stellar.UploadWasmOp([]byte(minimalWasm), signer.Address()),
-		false)
+		"upload", false)
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, signErr)
@@ -130,7 +130,7 @@ func TestRunTransactionDryRunSignsNothingAndSendsNothing(t *testing.T) {
 	result, err := svc.runTransaction(context.Background(),
 		resolved{Client: client},
 		stellar.UploadWasmOp([]byte(minimalWasm), signer.Address()),
-		true)
+		"upload", true)
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, client.SimulateCount(),

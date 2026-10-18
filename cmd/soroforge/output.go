@@ -87,6 +87,8 @@ func printDeployResult(r *deploy.DeployResult) error {
 	printWebhooks(w, r.Webhooks)
 
 	if r.DryRun {
+		printEstimatedFees(w, r.EstimatedFees)
+
 		fmt.Fprintf(w, "\nAssembled transaction envelopes (unsigned):\n")
 		if r.UploadEnvelopeXDR != "" {
 			fmt.Fprintf(w, "\n  upload:\n  %s\n", r.UploadEnvelopeXDR)
@@ -160,12 +162,99 @@ func printUpgradeResult(r *deploy.UpgradeResult) error {
 	printCatalog(w, r.Catalog)
 	printWebhooks(w, r.Webhooks)
 
-	if r.DryRun && r.UpgradeEnvelopeXDR != "" {
-		fmt.Fprintf(w, "\nAssembled upgrade envelope (unsigned):\n\n  %s\n", r.UpgradeEnvelopeXDR)
-		fmt.Fprintf(w, "\nRe-run without --dry-run to submit.\n")
+	if r.DryRun {
+		printEstimatedFees(w, r.EstimatedFees)
+
+		if r.UpgradeEnvelopeXDR != "" {
+			fmt.Fprintf(w, "\nAssembled upgrade envelope (unsigned):\n\n  %s\n", r.UpgradeEnvelopeXDR)
+			fmt.Fprintf(w, "\nRe-run without --dry-run to submit.\n")
+		}
 	}
 
 	return nil
+}
+
+// printEstimatedFees renders a dry run's per-transaction and total cost. The
+// figures come from simulation, so they are labelled as estimates rather than
+// promises: the network can charge differently by the time a real deploy runs.
+func printEstimatedFees(w io.Writer, f *deploy.DryRunFees) {
+	if f == nil {
+		return
+	}
+
+	fmt.Fprintf(w, "\nEstimated fees (from simulation; the actual fee may differ):\n")
+	for _, row := range []struct {
+		label string
+		fee   *deploy.FeeEstimate
+	}{
+		{"upload", f.Upload},
+		{"create", f.Create},
+		{"upgrade", f.Upgrade},
+		{"init", f.Init},
+	} {
+		if row.fee == nil {
+			continue
+		}
+		fmt.Fprintf(w, "  %-8s %d stroops (%s XLM)\n", row.label, row.fee.TotalStroops, row.fee.TotalXLM)
+	}
+	fmt.Fprintf(w, "  %-8s %d stroops (%s XLM)\n", "total", f.Total.TotalStroops, f.Total.TotalXLM)
+}
+
+// stderrIsTerminal reports whether stderr is a character device. Only then is
+// in-place progress output safe; pipes, files, and CI logs are not.
+func stderrIsTerminal() bool {
+	info, err := os.Stderr.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
+}
+
+// progressFor returns a progress printer when progress should be shown: always
+// with --progress, and otherwise only when stderr is a terminal. It returns nil
+// when progress is off, which leaves the service silent.
+func progressFor(force bool) deploy.ProgressFunc {
+	interactive := stderrIsTerminal()
+	if !force && !interactive {
+		return nil
+	}
+	return progressPrinter(os.Stderr, interactive)
+}
+
+// progressPrinter renders deploy progress to w. On a terminal each event
+// rewrites a single line; elsewhere each event is its own line, which is what
+// a CI log wants.
+func progressPrinter(w io.Writer, interactive bool) deploy.ProgressFunc {
+	if !interactive {
+		return func(ev deploy.ProgressEvent) {
+			fmt.Fprintln(w, progressLine(ev))
+		}
+	}
+	return func(ev deploy.ProgressEvent) {
+		line := progressLine(ev)
+		if ev.Phase == deploy.ProgressConfirmed {
+			fmt.Fprintf(w, "\r\033[K%s\n", line)
+			return
+		}
+		fmt.Fprintf(w, "\r\033[K%s", line)
+	}
+}
+
+// progressLine renders one event as a single line of text.
+func progressLine(ev deploy.ProgressEvent) string {
+	prefix := fmt.Sprintf("%s on %s: %s", ev.Alias, ev.Network, ev.Step)
+	switch ev.Phase {
+	case deploy.ProgressSimulating:
+		return prefix + ": simulating…"
+	case deploy.ProgressSubmitted:
+		return fmt.Sprintf("%s: submitted (%s)", prefix, shortHash(ev.Hash))
+	case deploy.ProgressWaiting:
+		return fmt.Sprintf("%s: waiting for ledger %d…", prefix, ev.Ledger)
+	case deploy.ProgressConfirmed:
+		return fmt.Sprintf("%s: confirmed in ledger %d", prefix, ev.Ledger)
+	default:
+		return prefix + ": " + ev.Phase
+	}
 }
 
 func printUploadResult(r *deploy.UploadResult) error {

@@ -16,13 +16,7 @@ import (
 
 const wasmMagic = "\x00asm"
 
-func newConfigCmd() *cobra.Command {
-	configCmd := &cobra.Command{
-		Use:   "config",
-		Short: "Inspect and validate project configuration",
-		Args:  cobra.NoArgs,
-	}
-
+func newConfigCheckCmd() *cobra.Command {
 	var offline bool
 	checkCmd := &cobra.Command{
 		Use:   "check",
@@ -50,8 +44,7 @@ the network checks.`,
 		},
 	}
 	checkCmd.Flags().BoolVar(&offline, "offline", false, "skip RPC network checks")
-	configCmd.AddCommand(checkCmd)
-	return configCmd
+	return checkCmd
 }
 
 func checkConfig(
