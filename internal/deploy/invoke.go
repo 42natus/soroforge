@@ -96,7 +96,7 @@ func (s *Service) Invoke(ctx context.Context, req InvokeRequest) (*InvokeResult,
 		return nil, fmt.Errorf("build invoke op: %w", err)
 	}
 
-	txRes, err := s.runTransaction(ctx, r, invokeOp, req.DryRun)
+	txRes, err := s.runTransaction(ctx, r, invokeOp, "invoke", req.DryRun)
 	if err != nil {
 		return nil, fmt.Errorf("invoke %s on %s: %w", req.Function, tracked.ContractID, err)
 	}

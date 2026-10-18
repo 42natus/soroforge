@@ -2,8 +2,10 @@ package stellar
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 
+	"github.com/stellar/go-stellar-sdk/network"
 	"github.com/stellar/go-stellar-sdk/strkey"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
@@ -52,6 +54,71 @@ func ContractIDFromScVal(val xdr.ScVal) (string, error) {
 		return "", fmt.Errorf("encode contract id: %w", err)
 	}
 	return encoded, nil
+}
+
+// ContractIDFromDeployer derives the address a CreateContractV2 operation with
+// this deployer and salt will produce.
+//
+// A contract's address commits to the network, deployer, and salt — not to the
+// bytecode — so it can be computed before anything is uploaded. That is what
+// lets a deploy check for a collision before paying for an upload, and it
+// agrees with what ContractIDFromSimulation later reports.
+func ContractIDFromDeployer(networkPassphrase, deployer string, salt [32]byte) (string, error) {
+	deployerAccount, err := xdr.AddressToAccountId(deployer)
+	if err != nil {
+		return "", fmt.Errorf("deployer address %q: %w", deployer, err)
+	}
+
+	// The network ID is the SHA-256 of the public network passphrase, as the
+	// protocol defines it; network.ID computes exactly that.
+	networkID := network.ID(networkPassphrase)
+	preimage := xdr.HashIdPreimage{
+		Type: xdr.EnvelopeTypeEnvelopeTypeContractId,
+		ContractId: &xdr.HashIdPreimageContractId{
+			NetworkId: xdr.Hash(networkID),
+			ContractIdPreimage: xdr.ContractIdPreimage{
+				Type: xdr.ContractIdPreimageTypeContractIdPreimageFromAddress,
+				FromAddress: &xdr.ContractIdPreimageFromAddress{
+					Address: xdr.ScAddress{
+						Type:      xdr.ScAddressTypeScAddressTypeAccount,
+						AccountId: &deployerAccount,
+					},
+					Salt: xdr.Uint256(salt),
+				},
+			},
+		},
+	}
+
+	encoded, err := preimage.MarshalBinary()
+	if err != nil {
+		return "", fmt.Errorf("encode contract id preimage: %w", err)
+	}
+	id := sha256.Sum256(encoded)
+
+	contractID, err := strkey.Encode(strkey.VersionByteContract, id[:])
+	if err != nil {
+		return "", fmt.Errorf("encode contract id: %w", err)
+	}
+	return contractID, nil
+}
+
+// ContractExists reports whether a contract has an instance entry on-chain —
+// that is, whether its address is already occupied.
+func ContractExists(ctx context.Context, client Client, contractID string) (bool, error) {
+	key, err := InstanceLedgerKey(contractID)
+	if err != nil {
+		return false, err
+	}
+	encodedKey, err := xdr.MarshalBase64(key)
+	if err != nil {
+		return false, fmt.Errorf("encode instance ledger key: %w", err)
+	}
+
+	entries, err := client.LedgerEntries(ctx, []string{encodedKey})
+	if err != nil {
+		return false, err
+	}
+	return len(entries) > 0, nil
 }
 
 // InstanceLedgerKey builds the LedgerKey for a contract's instance entry, whose

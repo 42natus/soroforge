@@ -59,6 +59,9 @@ type harnessOptions struct {
 	// catalog replaces the SoroVault registrar.
 	catalog catalog.Registrar
 
+	// progress receives deploy progress events, when set.
+	progress deploy.ProgressFunc
+
 	// webhooks replaces the webhook sender.
 	webhooks deploy.WebhookSender
 
@@ -124,6 +127,7 @@ contracts:
 		// to capture them.
 		Log:      slog.New(slog.NewTextHandler(orIoDiscard(opts.logOut), nil)),
 		Catalog:  opts.catalog,
+		Progress: opts.progress,
 		Webhooks: opts.webhooks,
 	})
 	require.NoError(t, err)

@@ -160,7 +160,8 @@ Set `DATABASE_URL`, and a deployer key via either `SOROFORGE_SECRET_KEY` or
 notes](#security-notes-on-key-handling) first.
 
 **4. Dry run.** This assembles and simulates both transactions, prints the
-contract address a real deploy would produce, and submits and records nothing:
+contract address a real deploy would produce, the estimated fee for each
+transaction and in total (in stroops and XLM), and submits and records nothing:
 
 ```bash
 ./bin/soroforge deploy counter --network testnet --dry-run
@@ -214,6 +215,11 @@ inferred from the name — it's mixed into every signature, so a wrong value
 produces a transaction that's invalid on the network you meant to use, and a
 silently defaulted one could sign a mainnet deploy with testnet assumptions.
 
+To see what SoroForge actually resolved — file, environment and flags merged —
+run `soroforge config show`. It needs neither Postgres nor a signing key, prints
+contract WASM paths resolved to absolute paths, and reports secrets only as
+`(set)` or `(unset)`. `--json` emits the same view for scripts.
+
 There is **no public SDF-hosted mainnet RPC**. Point `mainnet` at a provider you
 trust or at your own node.
 
@@ -259,7 +265,11 @@ shell's working directory, so `soroforge deploy` behaves the same from anywhere.
 
 **`salt`** makes a contract's address reproducible: addresses derive from
 (deployer address, salt). Leave it unset and each deploy uses a random salt, so
-deploying the same alias twice produces two distinct contracts.
+deploying the same alias twice produces two distinct contracts. With a fixed
+salt the address is known before the upload, so a deploy checks whether a
+contract already exists there and stops with an actionable message — naming the
+address and suggesting `soroforge upgrade` or a different salt — rather than
+paying for an upload and failing later in simulation.
 
 ### Constructor arguments
 
@@ -370,6 +380,7 @@ of an error printed mid-prompt.
 | Command | Description |
 |---|---|
 | `init` | Write a starter `soroforge.yaml` for the contracts built under `target/`. |
+| `config show` | Print the resolved configuration (networks, contracts, environment); secrets stay `(set)`/`(unset)`. |
 | `config check` | Check config and WASM files; `--offline` skips RPC checks. |
 | `deploy <alias>` | Upload WASM, instantiate the contract, record it. |
 | `upgrade <alias>` | Upload new WASM and invoke the contract's upgrade entrypoint. |
@@ -386,10 +397,10 @@ of an error printed mid-prompt.
 | `version` | Print the SoroForge version. |
 
 `deploy`, `upgrade`, and `upload` accept `--dry-run` and `--notes`. Deploy and
-upgrade also accept `--git-commit` to record a source revision supplied by CI
-instead of detecting the current checkout, and `--require-spec`. History displays
-confirmed transaction fees in stroops and XLM, plus the short source commit (`*`
-marks a dirty working tree).
+upgrade also accept `--progress`, `--require-spec`, and `--git-commit`, which
+records a source revision supplied by CI instead of detecting the current
+checkout. History displays confirmed transaction fees in stroops and XLM, plus
+the short source commit (`*` marks a dirty working tree).
 
 **Artifact checks** run before any network call. WASM over the network's
 contract size limit is rejected with its size and the limit, plus a hint to run
@@ -406,8 +417,16 @@ network passphrase. It aggregates failures into one non-zero result. Pass
 `--offline` to skip RPC checks while still validating every artifact.
 
 **`--dry-run`** runs everything up to and including simulation and assembly,
-then stops. It prints the assembled envelopes and the resulting contract
-address, and writes nothing and submits nothing. It's safe to point at mainnet.
+then stops. It prints the assembled envelopes, the resulting contract address,
+and the estimated fee for each transaction and in total — in stroops and XLM,
+from simulation plus the base fee, so the estimate matches what a real
+submission would declare. It writes nothing and submits nothing, and is safe to
+point at mainnet.
+
+**`--progress`** writes a progress line to stderr (`simulating`, `submitted`,
+`waiting for ledger N`, `confirmed`) while a deploy waits for confirmation.
+Progress is shown automatically when stderr is a terminal; the flag forces it on
+in a pipe or CI log. Stdout, including `--json`, is never touched.
 
 **`status` exit codes** make it usable as a CI gate:
 
