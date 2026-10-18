@@ -379,6 +379,7 @@ func TestReadEndpointsAlsoRequireAuth(t *testing.T) {
 		"/v1/contracts",
 		"/v1/contracts/testnet/counter/history",
 		"/v1/contracts/testnet/counter/status",
+		"/v1/jobs/some-job",
 		"/v1/deployments/1",
 	} {
 		t.Run(path, func(t *testing.T) {

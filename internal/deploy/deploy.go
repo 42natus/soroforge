@@ -52,6 +52,10 @@ type DeployRequest struct {
 
 	// GitCommit overrides automatic commit detection, for detached CI checkouts.
 	GitCommit string `json:"git_commit,omitempty"`
+
+	// RequireSpec makes a missing contractspecv0 section an error rather than a
+	// warning.
+	RequireSpec bool `json:"require_spec,omitempty"`
 }
 
 // DeployResult describes a completed or simulated deploy.
@@ -88,6 +92,10 @@ type DeployResult struct {
 	// UploadSkipped reports that the bytecode was already on-chain.
 	UploadSkipped bool `json:"upload_skipped,omitempty"`
 
+	// Warnings lists non-fatal problems found in the local artifact. It is empty
+	// for a clean deploy, and populated in --json output too.
+	Warnings []string `json:"warnings,omitempty"`
+
 	// Deployment is the recorded history entry, absent on a dry run.
 	Deployment *store.Deployment `json:"deployment,omitempty"`
 
@@ -121,6 +129,10 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 	if err != nil {
 		return nil, err
 	}
+	warnings, err := s.checkWasm(wasm, req.RequireSpec)
+	if err != nil {
+		return nil, err
+	}
 	wasmHash := stellar.WasmHash(wasm)
 	wasmHashHex := stellar.HashHex(wasmHash)
 
@@ -138,6 +150,7 @@ func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult,
 		WasmHash: wasmHashHex,
 		Deployer: signer.Address(),
 		DryRun:   req.DryRun,
+		Warnings: warnings,
 	}
 
 	// Step 1: upload the bytecode, unless it is already on-chain.
@@ -325,6 +338,33 @@ func (s *Service) readWasm(c config.Contract) ([]byte, error) {
 		return nil, fmt.Errorf("wasm artifact at %s is empty", path)
 	}
 	return wasm, nil
+}
+
+// checkWasm vets a local artifact before any network work. Both problems it
+// finds are cheap to fix while the file is still on disk, and expensive to
+// discover after a simulation or a live deploy.
+//
+// It returns warnings for non-fatal findings; requireSpec turns the missing
+// interface warning into an error.
+func (s *Service) checkWasm(wasm []byte, requireSpec bool) ([]string, error) {
+	if err := stellar.CheckWasmSize(wasm, s.maxContractSize); err != nil {
+		return nil, err
+	}
+
+	hasSpec, err := stellar.HasContractSpec(wasm)
+	if err != nil {
+		return nil, fmt.Errorf("malformed wasm: %w", err)
+	}
+	if hasSpec {
+		return nil, nil
+	}
+
+	const missing = "wasm has no contractspecv0 section: SoroVault cannot catalogue this contract, " +
+		"client bindings cannot be generated, and SoroProbe cannot type its arguments"
+	if requireSpec {
+		return nil, fmt.Errorf("%s (remove --require-spec to deploy anyway)", missing)
+	}
+	return []string{missing}, nil
 }
 
 // salt returns the contract's configured salt, or a fresh random one.

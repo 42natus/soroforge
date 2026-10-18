@@ -85,6 +85,34 @@
         }
       }
     },
+    "/v1/jobs/{id}": {
+      "get": {
+        "operationId": "getJob",
+        "summary": "Get status of an asynchronous deploy or upgrade job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Job ID",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Job status and, when finished, its result",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Job" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/ServerError" }
+        }
+      }
+    },
     "/v1/contracts": {
       "get": {
         "operationId": "listContracts",
@@ -264,6 +292,21 @@
         "network": { "type": "string" }, "in_sync": { "type": "boolean" },
         "contracts": { "type": "array", "items": { "$ref": "#/components/schemas/StatusResult" } }
       } },
+      "Job": {
+        "type": "object",
+        "required": ["id", "state", "alias", "created_at"],
+        "properties": {
+          "id": { "type": "string" },
+          "state": { "type": "string", "enum": ["queued", "running", "succeeded", "failed"] },
+          "alias": { "type": "string" },
+          "network": { "type": "string" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "started_at": { "type": "string", "format": "date-time" },
+          "finished_at": { "type": "string", "format": "date-time" },
+          "result": { "type": "object" },
+          "error": { "type": "string" }
+        }
+      },
       "ReadinessStatus": { "type": "object", "required": ["ready", "dependencies"], "properties": {
         "ready": { "type": "boolean" }, "dependencies": { "type": "array", "items": { "type": "object", "required": ["name", "ok"], "properties": {
           "name": { "type": "string" }, "ok": { "type": "boolean" }, "error": { "type": "string" }
