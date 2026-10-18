@@ -226,6 +226,27 @@ and is best-effort: if SoroVault is down, the deploy still succeeds and is
 recorded, and the output (`catalog` in JSON) says registration failed so you
 can run `sorovault add` later. Dry runs never register anything.
 
+**`webhooks`** notifies endpoints (Slack, Discord, internal services) whenever
+a contract deploy or upgrade is confirmed. Networks can list URLs, or mappings
+with `url` and an optional `secret`:
+
+```yaml
+networks:
+  mainnet:
+    rpc_url: https://mainnet.example.org
+    passphrase: "Public Global Stellar Network ; September 2015"
+    webhooks:
+      - https://hooks.slack.com/services/...
+      - url: https://internal.example.org/deploy-webhook
+        secret: "shared-secret"
+```
+
+Each webhook receives a POST request with a JSON payload (`alias`, `network`,
+`contract_id`, `wasm_hash`, `action`, `deployer_pubkey`, `tx_hash`, `ledger`,
+`notes`). When a `secret` is provided, SoroForge signs the payload with HMAC-SHA256
+in the `X-SoroForge-Signature` header (`sha256=<hex>`). Delivery is best-effort with
+a timeout: a failing webhook never fails the deploy. Dry runs never trigger webhooks.
+
 **Contracts.** `wasm` paths resolve against the config file's directory, not your
 shell's working directory, so `soroforge deploy` behaves the same from anywhere.
 
@@ -255,6 +276,8 @@ constructor_args:
 | `void` | omit `value` |
 | `u32` `i32` `u64` `i64` | decimal integer |
 | `u128` `i128` | decimal integer **as a quoted string** |
+| `u256` `i256` | decimal integer **as a quoted string** |
+| `timepoint` `duration` | decimal integer (64-bit unsigned) |
 | `string` `symbol` | text (`symbol` is `[a-zA-Z0-9_]`, max 32 chars) |
 | `bytes` | hex, with or without `0x` |
 | `address` | `G...` account or `C...` contract |
@@ -457,6 +480,7 @@ unknown token is **401 Unauthorized**.
 | `GET` | `/v1/contracts/{network}/{alias}/history?limit=&offset=` | read | Deployment history, paginated (default limit 100, maximum 500). |
 | `GET` | `/v1/contracts/{network}/{alias}/status` | read | Drift check. |
 | `GET` | `/v1/contracts/{network}/status` | read | Drift check of every tracked contract; `in_sync` is the verdict. |
+| `GET` | `/v1/deployments/{id}` | read | Single deployment record by ID. Returns 404 if not found. |
 
 Every route's scope is declared in one table in
 [`internal/api/api.go`](internal/api/api.go), and a test walks the built router

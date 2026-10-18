@@ -262,3 +262,20 @@ func (m *MemoryStore) HistoryPage(ctx context.Context, network, alias string, li
 
 // Close implements Store. There is nothing to release.
 func (m *MemoryStore) Close() error { return nil }
+
+// GetDeployment implements Store.
+func (m *MemoryStore) GetDeployment(ctx context.Context, id int64) (Deployment, error) {
+	if err := ctx.Err(); err != nil {
+		return Deployment{}, err
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, d := range m.deployments {
+		if d.ID == id {
+			return d, nil
+		}
+	}
+	return Deployment{}, fmt.Errorf("deployment %d: %w", id, ErrNotFound)
+}

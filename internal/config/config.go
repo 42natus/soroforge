@@ -76,6 +76,34 @@ type Network struct {
 	// Every confirmed deploy and upgrade is registered there, so the
 	// contract's interface is discoverable as soon as it is live. Optional.
 	SoroVaultURL string `yaml:"sorovault_url"`
+
+	// Webhooks lists endpoints notified after each confirmed deploy or upgrade.
+	// Optional.
+	Webhooks []Webhook `yaml:"webhooks"`
+}
+
+// Webhook configures a notification target for confirmed contract events.
+type Webhook struct {
+	URL    string `yaml:"url"`
+	Secret string `yaml:"secret"`
+}
+
+// UnmarshalYAML supports both a bare URL string and an object with url and secret.
+func (w *Webhook) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind == yaml.ScalarNode {
+		w.URL = node.Value
+		return nil
+	}
+	if node.Kind == yaml.MappingNode {
+		type rawWebhook Webhook
+		var raw rawWebhook
+		if err := node.Decode(&raw); err != nil {
+			return err
+		}
+		*w = Webhook(raw)
+		return nil
+	}
+	return fmt.Errorf("webhook: expected a URL string or {url, secret} mapping")
 }
 
 // Contract is a contract SoroForge manages.

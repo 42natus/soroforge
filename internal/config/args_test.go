@@ -91,6 +91,26 @@ func TestArgToScValScalarTypes(t *testing.T) {
 			wantType: xdr.ScValTypeScvU32,
 			check:    func(t *testing.T, v xdr.ScVal) { assert.Equal(t, xdr.Uint32(7), *v.U32) },
 		},
+		"timepoint": {
+			yaml:     "{type: timepoint, value: 1700000000}",
+			wantType: xdr.ScValTypeScvTimepoint,
+			check:    func(t *testing.T, v xdr.ScVal) { assert.Equal(t, xdr.TimePoint(1700000000), *v.Timepoint) },
+		},
+		"timepoint max": {
+			yaml:     `{type: timepoint, value: "18446744073709551615"}`,
+			wantType: xdr.ScValTypeScvTimepoint,
+			check:    func(t *testing.T, v xdr.ScVal) { assert.Equal(t, xdr.TimePoint(18446744073709551615), *v.Timepoint) },
+		},
+		"duration": {
+			yaml:     "{type: duration, value: 3600}",
+			wantType: xdr.ScValTypeScvDuration,
+			check:    func(t *testing.T, v xdr.ScVal) { assert.Equal(t, xdr.Duration(3600), *v.Duration) },
+		},
+		"duration max": {
+			yaml:     `{type: duration, value: "18446744073709551615"}`,
+			wantType: xdr.ScValTypeScvDuration,
+			check:    func(t *testing.T, v xdr.ScVal) { assert.Equal(t, xdr.Duration(18446744073709551615), *v.Duration) },
+		},
 	}
 
 	for name, tc := range tests {
@@ -160,6 +180,85 @@ func TestArgToScVal128BitIntegers(t *testing.T) {
 				require.NotNil(t, val.I128)
 				assert.Equal(t, want, val.I128.Hi)
 				assert.Equal(t, tc.wantLo, val.I128.Lo)
+			}
+
+			_, err = xdr.MarshalBase64(val)
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestArgToScVal256BitIntegers(t *testing.T) {
+	tests := map[string]struct {
+		yaml     string
+		wantHiHi any
+		wantHiLo xdr.Uint64
+		wantLoHi xdr.Uint64
+		wantLoLo xdr.Uint64
+	}{
+		"u256 zero": {
+			yaml:     `{type: u256, value: "0"}`,
+			wantHiHi: xdr.Uint64(0), wantHiLo: 0, wantLoHi: 0, wantLoLo: 0,
+		},
+		"u256 low word only": {
+			yaml:     `{type: u256, value: "18446744073709551615"}`,
+			wantHiHi: xdr.Uint64(0), wantHiLo: 0, wantLoHi: 0, wantLoLo: 18446744073709551615,
+		},
+		"u256 spans multiple words": {
+			yaml:     `{type: u256, value: "340282366920938463463374607431768211456"}`, // 2^128
+			wantHiHi: xdr.Uint64(0), wantHiLo: 1, wantLoHi: 0, wantLoLo: 0,
+		},
+		"u256 maximum": {
+			// 2^256 - 1
+			yaml:     `{type: u256, value: "115792089237316195423570985008687907853269984665640564039457584007913129639935"}`,
+			wantHiHi: xdr.Uint64(18446744073709551615), wantHiLo: 18446744073709551615,
+			wantLoHi: 18446744073709551615, wantLoLo: 18446744073709551615,
+		},
+		"i256 zero": {
+			yaml:     `{type: i256, value: "0"}`,
+			wantHiHi: xdr.Int64(0), wantHiLo: 0, wantLoHi: 0, wantLoLo: 0,
+		},
+		"i256 positive one": {
+			yaml:     `{type: i256, value: "1"}`,
+			wantHiHi: xdr.Int64(0), wantHiLo: 0, wantLoHi: 0, wantLoLo: 1,
+		},
+		"i256 negative one": {
+			// Two's complement: -1 is all bits set
+			yaml:     `{type: i256, value: "-1"}`,
+			wantHiHi: xdr.Int64(-1), wantHiLo: 18446744073709551615,
+			wantLoHi: 18446744073709551615, wantLoLo: 18446744073709551615,
+		},
+		"i256 maximum": {
+			// 2^255 - 1
+			yaml:     `{type: i256, value: "57896044618658097711785492504343953926634992332820282019728792003956564819967"}`,
+			wantHiHi: xdr.Int64(9223372036854775807), wantHiLo: 18446744073709551615,
+			wantLoHi: 18446744073709551615, wantLoLo: 18446744073709551615,
+		},
+		"i256 minimum": {
+			// -2^255
+			yaml:     `{type: i256, value: "-57896044618658097711785492504343953926634992332820282019728792003956564819968"}`,
+			wantHiHi: xdr.Int64(-9223372036854775808), wantHiLo: 0, wantLoHi: 0, wantLoLo: 0,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			val, err := argFromYAML(t, tc.yaml).ToScVal()
+			require.NoError(t, err)
+
+			switch want := tc.wantHiHi.(type) {
+			case xdr.Uint64:
+				require.NotNil(t, val.U256)
+				assert.Equal(t, want, val.U256.HiHi)
+				assert.Equal(t, tc.wantHiLo, val.U256.HiLo)
+				assert.Equal(t, tc.wantLoHi, val.U256.LoHi)
+				assert.Equal(t, tc.wantLoLo, val.U256.LoLo)
+			case xdr.Int64:
+				require.NotNil(t, val.I256)
+				assert.Equal(t, want, val.I256.HiHi)
+				assert.Equal(t, tc.wantHiLo, val.I256.HiLo)
+				assert.Equal(t, tc.wantLoHi, val.I256.LoHi)
+				assert.Equal(t, tc.wantLoLo, val.I256.LoLo)
 			}
 
 			_, err = xdr.MarshalBase64(val)
@@ -256,7 +355,7 @@ func TestArgToScValRejectsBadInput(t *testing.T) {
 			wantErr: "missing type",
 		},
 		"unknown type names the escape hatch": {
-			arg:     Arg{Type: "u256", Value: NewValue("1")},
+			arg:     Arg{Type: "u512", Value: NewValue("1")},
 			wantErr: "type: xdr",
 		},
 		"u32 overflow": {
@@ -278,6 +377,42 @@ func TestArgToScValRejectsBadInput(t *testing.T) {
 		"i128 not a number": {
 			arg:     Arg{Type: ArgI128, Value: NewValue("abc")},
 			wantErr: "not a valid decimal integer",
+		},
+		"u256 out of range": {
+			arg:     Arg{Type: ArgU256, Value: NewValue("115792089237316195423570985008687907853269984665640564039457584007913129639936")},
+			wantErr: "out of range",
+		},
+		"u256 negative": {
+			arg:     Arg{Type: ArgU256, Value: NewValue("-1")},
+			wantErr: "out of range",
+		},
+		"i256 not a number": {
+			arg:     Arg{Type: ArgI256, Value: NewValue("abc")},
+			wantErr: "not a valid decimal integer",
+		},
+		"i256 out of range positive": {
+			arg:     Arg{Type: ArgI256, Value: NewValue("57896044618658097711785492504343953926634992332820282019728792003956564819968")},
+			wantErr: "out of range",
+		},
+		"i256 out of range negative": {
+			arg:     Arg{Type: ArgI256, Value: NewValue("-57896044618658097711785492504343953926634992332820282019728792003956564819969")},
+			wantErr: "out of range",
+		},
+		"timepoint negative": {
+			arg:     Arg{Type: ArgTimepoint, Value: NewValue("-1")},
+			wantErr: "not a valid u64",
+		},
+		"timepoint overflow": {
+			arg:     Arg{Type: ArgTimepoint, Value: NewValue("18446744073709551616")},
+			wantErr: "not a valid u64",
+		},
+		"duration negative": {
+			arg:     Arg{Type: ArgDuration, Value: NewValue("-1")},
+			wantErr: "not a valid u64",
+		},
+		"duration overflow": {
+			arg:     Arg{Type: ArgDuration, Value: NewValue("18446744073709551616")},
+			wantErr: "not a valid u64",
 		},
 		"bad bool": {
 			arg:     Arg{Type: ArgBool, Value: NewValue("maybe")},
@@ -318,6 +453,21 @@ func TestArgToScValRejectsBadInput(t *testing.T) {
 			_, err := tc.arg.ToScVal()
 			assert.ErrorContains(t, err, tc.wantErr)
 		})
+	}
+}
+
+func TestArgToScVal256BitUnquotedRejection(t *testing.T) {
+	// Unquoted integers for 256-bit numbers must be rejected to prevent YAML rounding.
+	docs := []string{
+		`{type: u256, value: 123456789012345678901234567890}`,
+		`{type: i256, value: 123456789012345678901234567890}`,
+		`{type: u256, value: 42}`,
+		`{type: i256, value: 42}`,
+	}
+	for _, doc := range docs {
+		_, err := argFromYAML(t, doc).ToScVal()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "quoted strings in YAML")
 	}
 }
 

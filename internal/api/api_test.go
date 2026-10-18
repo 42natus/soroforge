@@ -120,6 +120,18 @@ func (f *fakeService) History(_ context.Context, network, alias string) ([]store
 	return f.deployments, nil
 }
 
+func (f *fakeService) GetDeployment(_ context.Context, id int64) (store.Deployment, error) {
+	if f.err != nil {
+		return store.Deployment{}, f.err
+	}
+	for _, d := range f.deployments {
+		if d.ID == id {
+			return d, nil
+		}
+	}
+	return store.Deployment{}, store.ErrNotFound
+}
+
 func (f *fakeService) HistoryPage(_ context.Context, network, alias string, limit, offset int) ([]store.Deployment, error) {
 	f.lastNetwork = network
 	f.lastAlias = alias
@@ -367,6 +379,7 @@ func TestReadEndpointsAlsoRequireAuth(t *testing.T) {
 		"/v1/contracts",
 		"/v1/contracts/testnet/counter/history",
 		"/v1/contracts/testnet/counter/status",
+		"/v1/deployments/1",
 	} {
 		t.Run(path, func(t *testing.T) {
 			rec := do(t, router, http.MethodGet, path, nil, &empty)
@@ -407,7 +420,7 @@ func TestReadOnlyTokenCanReadButNotDeploy(t *testing.T) {
 func TestReadOnlyTokenReadsEveryReadRoute(t *testing.T) {
 	svc := &fakeService{
 		contracts:     []store.Contract{},
-		deployments:   []store.Deployment{},
+		deployments:   []store.Deployment{{ID: 1, Alias: "counter", Network: "testnet"}},
 		statusResult:  &deploy.StatusResult{},
 		networkStatus: &deploy.NetworkStatus{},
 	}
@@ -419,12 +432,52 @@ func TestReadOnlyTokenReadsEveryReadRoute(t *testing.T) {
 		"/v1/contracts/testnet/counter/history",
 		"/v1/contracts/testnet/counter/status",
 		"/v1/contracts/testnet/status",
+		"/v1/deployments/1",
 	} {
 		t.Run(path, func(t *testing.T) {
 			rec := do(t, router, http.MethodGet, path, nil, &readOnly)
 			assert.Equal(t, http.StatusOK, rec.Code)
 		})
 	}
+}
+
+func TestGetDeploymentByID(t *testing.T) {
+	svc := &fakeService{
+		deployments: []store.Deployment{
+			{
+				ID:             42,
+				Alias:          "counter",
+				Network:        "testnet",
+				ContractID:     "CC",
+				WasmHash:       "hash42",
+				Action:         store.ActionDeploy,
+				DeployerPubkey: "GABC",
+			},
+		},
+	}
+	router := newTestRouter(t, svc)
+	tok := testToken
+
+	t.Run("found returns deployment", func(t *testing.T) {
+		rec := do(t, router, http.MethodGet, "/v1/deployments/42", nil, &tok)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var got store.Deployment
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+		assert.Equal(t, int64(42), got.ID)
+		assert.Equal(t, "counter", got.Alias)
+		assert.Equal(t, "testnet", got.Network)
+	})
+
+	t.Run("not found returns 404", func(t *testing.T) {
+		rec := do(t, router, http.MethodGet, "/v1/deployments/999", nil, &tok)
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+		assert.Contains(t, rec.Body.String(), "not found")
+	})
+
+	t.Run("invalid id returns 400", func(t *testing.T) {
+		rec := do(t, router, http.MethodGet, "/v1/deployments/not-a-number", nil, &tok)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+	})
 }
 
 func TestPaginationReturnsNextOffset(t *testing.T) {

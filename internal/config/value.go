@@ -126,6 +126,46 @@ func (v Value) asInt128() (xdr.Int128Parts, error) {
 	return xdr.Int128Parts{Hi: xdr.Int64(int64(hi)), Lo: xdr.Uint64(lo)}, nil
 }
 
+func (v Value) asUint256() (xdr.UInt256Parts, error) {
+	if v.node.Kind == yaml.ScalarNode && (v.node.Tag == "!!int" || v.node.Tag == "!!float") {
+		return xdr.UInt256Parts{}, fmt.Errorf("256-bit values must be quoted strings in YAML to prevent precision loss (e.g. \"123\")")
+	}
+	s, err := v.scalar()
+	if err != nil {
+		return xdr.UInt256Parts{}, err
+	}
+	hiHi, hiLo, loHi, loLo, err := parse256(s, false)
+	if err != nil {
+		return xdr.UInt256Parts{}, err
+	}
+	return xdr.UInt256Parts{
+		HiHi: xdr.Uint64(hiHi),
+		HiLo: xdr.Uint64(hiLo),
+		LoHi: xdr.Uint64(loHi),
+		LoLo: xdr.Uint64(loLo),
+	}, nil
+}
+
+func (v Value) asInt256() (xdr.Int256Parts, error) {
+	if v.node.Kind == yaml.ScalarNode && (v.node.Tag == "!!int" || v.node.Tag == "!!float") {
+		return xdr.Int256Parts{}, fmt.Errorf("256-bit values must be quoted strings in YAML to prevent precision loss (e.g. \"123\")")
+	}
+	s, err := v.scalar()
+	if err != nil {
+		return xdr.Int256Parts{}, err
+	}
+	hiHi, hiLo, loHi, loLo, err := parse256(s, true)
+	if err != nil {
+		return xdr.Int256Parts{}, err
+	}
+	return xdr.Int256Parts{
+		HiHi: xdr.Int64(int64(hiHi)),
+		HiLo: xdr.Uint64(hiLo),
+		LoHi: xdr.Uint64(loHi),
+		LoLo: xdr.Uint64(loLo),
+	}, nil
+}
+
 func kindName(k yaml.Kind) string {
 	switch k {
 	case yaml.SequenceNode:

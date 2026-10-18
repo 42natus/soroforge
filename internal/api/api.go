@@ -42,6 +42,7 @@ type Service interface {
 	StatusAll(ctx context.Context, network string) (*deploy.NetworkStatus, error)
 	ListPage(ctx context.Context, network string, limit, offset int) ([]store.Contract, error)
 	HistoryPage(ctx context.Context, network, alias string, limit, offset int) ([]store.Deployment, error)
+	GetDeployment(ctx context.Context, id int64) (store.Deployment, error)
 }
 
 // Readiness reports whether SoroForge's dependencies are usable. It backs
@@ -122,6 +123,8 @@ func (h *handlers) routes() []route {
 		{http.MethodGet, "/v1/contracts/{network}/{alias}/history", ScopeRead, h.history},
 		{http.MethodGet, "/v1/contracts/{network}/{alias}/status", ScopeRead, h.status},
 		{http.MethodGet, "/v1/contracts/{network}/status", ScopeRead, h.statusAll},
+
+		{http.MethodGet, "/v1/deployments/{id}", ScopeRead, h.getDeployment},
 	}
 }
 

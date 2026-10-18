@@ -39,26 +39,31 @@ type Arg struct {
 
 // Supported Arg type names.
 const (
-	ArgBool    = "bool"
-	ArgVoid    = "void"
-	ArgU32     = "u32"
-	ArgI32     = "i32"
-	ArgU64     = "u64"
-	ArgI64     = "i64"
-	ArgU128    = "u128"
-	ArgI128    = "i128"
-	ArgString  = "string"
-	ArgSymbol  = "symbol"
-	ArgBytes   = "bytes"
-	ArgAddress = "address"
-	ArgVec     = "vec"
-	ArgMap     = "map"
-	ArgXDR     = "xdr"
+	ArgBool      = "bool"
+	ArgVoid      = "void"
+	ArgU32       = "u32"
+	ArgI32       = "i32"
+	ArgU64       = "u64"
+	ArgI64       = "i64"
+	ArgU128      = "u128"
+	ArgI128      = "i128"
+	ArgU256      = "u256"
+	ArgI256      = "i256"
+	ArgTimepoint = "timepoint"
+	ArgDuration  = "duration"
+	ArgString    = "string"
+	ArgSymbol    = "symbol"
+	ArgBytes     = "bytes"
+	ArgAddress   = "address"
+	ArgVec       = "vec"
+	ArgMap       = "map"
+	ArgXDR       = "xdr"
 )
 
 // SupportedArgTypes lists every recognised Arg type, for error messages and docs.
 var SupportedArgTypes = []string{
 	ArgBool, ArgVoid, ArgU32, ArgI32, ArgU64, ArgI64, ArgU128, ArgI128,
+	ArgU256, ArgI256, ArgTimepoint, ArgDuration,
 	ArgString, ArgSymbol, ArgBytes, ArgAddress, ArgVec, ArgMap, ArgXDR,
 }
 
@@ -132,6 +137,36 @@ func (a Arg) ToScVal() (xdr.ScVal, error) {
 			return xdr.ScVal{}, err
 		}
 		return xdr.ScVal{Type: xdr.ScValTypeScvI128, I128: &parts}, nil
+
+	case ArgU256:
+		parts, err := a.Value.asUint256()
+		if err != nil {
+			return xdr.ScVal{}, err
+		}
+		return xdr.ScVal{Type: xdr.ScValTypeScvU256, U256: &parts}, nil
+
+	case ArgI256:
+		parts, err := a.Value.asInt256()
+		if err != nil {
+			return xdr.ScVal{}, err
+		}
+		return xdr.ScVal{Type: xdr.ScValTypeScvI256, I256: &parts}, nil
+
+	case ArgTimepoint:
+		n, err := a.Value.asUint(64)
+		if err != nil {
+			return xdr.ScVal{}, err
+		}
+		tp := xdr.TimePoint(n)
+		return xdr.ScVal{Type: xdr.ScValTypeScvTimepoint, Timepoint: &tp}, nil
+
+	case ArgDuration:
+		n, err := a.Value.asUint(64)
+		if err != nil {
+			return xdr.ScVal{}, err
+		}
+		dur := xdr.Duration(n)
+		return xdr.ScVal{Type: xdr.ScValTypeScvDuration, Duration: &dur}, nil
 
 	case ArgString:
 		s, err := a.Value.asString()
@@ -344,6 +379,44 @@ func parse128(s string, signed bool) (hi uint64, lo uint64, err error) {
 	lo = new(big.Int).And(n, loMask).Uint64()
 	hi = new(big.Int).Rsh(n, 64).Uint64()
 	return hi, lo, nil
+}
+
+// parse256 converts a decimal string into the 64-bit words Soroban uses for
+// 256-bit integers (HiHi, HiLo, LoHi, LoLo). signed selects the valid range.
+//
+// Follows SoroProbe's internal/scval/encode.go two's-complement split into
+// HiHi/HiLo/LoHi/LoLo words.
+func parse256(s string, signed bool) (hiHi, hiLo, loHi, loLo uint64, err error) {
+	n, ok := new(big.Int).SetString(strings.TrimSpace(s), 10)
+	if !ok {
+		return 0, 0, 0, 0, fmt.Errorf("%q is not a valid decimal integer", s)
+	}
+
+	var min, max *big.Int
+	if signed {
+		max = new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 255), big.NewInt(1))
+		min = new(big.Int).Neg(new(big.Int).Lsh(big.NewInt(1), 255))
+	} else {
+		max = new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
+		min = big.NewInt(0)
+	}
+	if n.Cmp(min) < 0 || n.Cmp(max) > 0 {
+		return 0, 0, 0, 0, fmt.Errorf("%s is out of range for a 256-bit %s integer",
+			n.String(), map[bool]string{true: "signed", false: "unsigned"}[signed])
+	}
+
+	// Two's complement for negatives, matching the XDR encoding.
+	// Approach follows SoroProbe's internal/scval/encode.go.
+	if n.Sign() < 0 {
+		n = new(big.Int).Add(new(big.Int).Lsh(big.NewInt(1), 256), n)
+	}
+
+	mask64 := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 64), big.NewInt(1))
+	loLo = new(big.Int).And(n, mask64).Uint64()
+	loHi = new(big.Int).And(new(big.Int).Rsh(n, 64), mask64).Uint64()
+	hiLo = new(big.Int).And(new(big.Int).Rsh(n, 128), mask64).Uint64()
+	hiHi = new(big.Int).Rsh(n, 192).Uint64()
+	return hiHi, hiLo, loHi, loLo, nil
 }
 
 // parseUint and parseInt accept the decimal forms YAML may hand us for an
