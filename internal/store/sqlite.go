@@ -265,6 +265,25 @@ FROM deployments
 WHERE network = ? AND alias = ?
 ORDER BY created_at DESC, id DESC`
 
+const sqliteGetDeployment = `
+SELECT id, alias, network, contract_id, wasm_hash, action,
+       deployer_pubkey, tx_hash, ledger, git_commit, dirty, fee_charged,
+       notes, ci_run_url, fn_name, fn_args, created_at
+FROM deployments
+WHERE id = ?`
+
+// GetDeployment implements Store.
+func (s *SQLite) GetDeployment(ctx context.Context, id int64) (Deployment, error) {
+	d, err := scanSQLiteDeployment(s.db.QueryRowContext(ctx, sqliteGetDeployment, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Deployment{}, fmt.Errorf("deployment %d: %w", id, ErrNotFound)
+	}
+	if err != nil {
+		return Deployment{}, fmt.Errorf("get deployment %d: %w", id, err)
+	}
+	return d, nil
+}
+
 // History implements Store. Ordered by timestamp then id, so records sharing
 // a clock tick keep insertion order — the same guarantee Postgres gives.
 func (s *SQLite) History(ctx context.Context, network, alias string) ([]Deployment, error) {

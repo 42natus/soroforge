@@ -92,6 +92,15 @@ func validateNetwork(name string, n Network) []string {
 		}
 	}
 
+	for i, wh := range n.Webhooks {
+		field := fmt.Sprintf("%s.webhooks[%d].url", prefix, i)
+		if strings.TrimSpace(wh.URL) == "" {
+			problems = append(problems, field+": must be set")
+		} else if p := checkHTTPURL(field, wh.URL); p != "" {
+			problems = append(problems, p)
+		}
+	}
+
 	// A blank passphrase would produce signatures valid on no network at all,
 	// and the failure surfaces as an opaque tx_bad_auth at submission time.
 	if strings.TrimSpace(n.Passphrase) == "" {

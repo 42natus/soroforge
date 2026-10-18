@@ -54,6 +54,13 @@ type harnessOptions struct {
 
 	// catalog replaces the SoroVault registrar.
 	catalog catalog.Registrar
+
+	// webhooks replaces the webhook sender.
+	webhooks deploy.WebhookSender
+
+	// logOut captures the service log instead of discarding it, for tests
+	// that assert on what is logged.
+	logOut io.Writer
 }
 
 func newHarness(t *testing.T, opts harnessOptions) *harness {
@@ -108,9 +115,11 @@ contracts:
 		Store:   memStore,
 		Signer:  signer,
 		Clients: func(string, config.Network) (stellar.Client, error) { return client, nil },
-		// Discard logs so test output stays readable.
-		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Catalog: opts.catalog,
+		// Discard logs so test output stays readable unless a test asks
+		// to capture them.
+		Log:      slog.New(slog.NewTextHandler(orIoDiscard(opts.logOut), nil)),
+		Catalog:  opts.catalog,
+		Webhooks: opts.webhooks,
 	})
 	require.NoError(t, err)
 
@@ -123,6 +132,14 @@ contracts:
 		contractID: contractID,
 		wasmHash:   stellar.WasmHash([]byte(wasm)),
 	}
+}
+
+// orIoDiscard keeps the harness log silent unless a test provides a writer.
+func orIoDiscard(w io.Writer) io.Writer {
+	if w != nil {
+		return w
+	}
+	return io.Discard
 }
 
 // simulationReturning builds a simulation response whose return value is the

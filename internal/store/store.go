@@ -141,6 +141,10 @@ type Store interface {
 	// History returns a contract's deployments, newest first.
 	History(ctx context.Context, network, alias string) ([]Deployment, error)
 
+	// GetDeployment returns one deployment by its ID. It returns ErrNotFound if
+	// no deployment with that ID exists.
+	GetDeployment(ctx context.Context, id int64) (Deployment, error)
+
 	// ListAllDeployments returns every recorded deployment across all
 	// networks and aliases, in id order. It backs `soroforge history export`,
 	// which must capture deployments whose alias has since left the config —
