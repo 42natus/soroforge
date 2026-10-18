@@ -160,11 +160,11 @@ func (p *Postgres) ListContractsPage(ctx context.Context, network string, limit,
 
 const recordDeploymentSQL = `
 INSERT INTO deployments (
-    alias, network, contract_id, wasm_hash, action, deployer_pubkey, tx_hash, ledger, git_commit, dirty, fee_charged, notes, ci_run_url, fn_name, fn_args
+    alias, network, contract_id, wasm_hash, action, deployer_pubkey, tx_hash, ledger, git_commit, dirty, fee_charged, notes, ci_run_url, fn_name, fn_args, constructor_args
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 RETURNING id, alias, network, contract_id, wasm_hash, action,
-		deployer_pubkey, tx_hash, ledger, git_commit, dirty, fee_charged, notes, ci_run_url, fn_name, fn_args, created_at`
+		deployer_pubkey, tx_hash, ledger, git_commit, dirty, fee_charged, notes, ci_run_url, fn_name, fn_args, constructor_args, created_at`
 
 // RecordDeployment implements Store.
 func (p *Postgres) RecordDeployment(ctx context.Context, d Deployment) (Deployment, error) {
@@ -187,6 +187,10 @@ func (p *Postgres) RecordDeployment(ctx context.Context, d Deployment) (Deployme
 	var notes *string
 	if d.Notes != "" {
 		notes = &d.Notes
+	}
+	var constructorArgs *string
+	if d.ConstructorArgs != "" {
+		constructorArgs = &d.ConstructorArgs
 	}
 
 	var feeCharged *int64
@@ -216,7 +220,7 @@ func (p *Postgres) RecordDeployment(ctx context.Context, d Deployment) (Deployme
 
 	row := p.pool.QueryRow(ctx, recordDeploymentSQL,
 		d.Alias, d.Network, d.ContractID, d.WasmHash, string(d.Action),
-		d.DeployerPubkey, txHash, ledger, gitCommit, dirty, feeCharged, notes, ciRunURL, fnName, fnArgs)
+		d.DeployerPubkey, txHash, ledger, gitCommit, dirty, feeCharged, notes, ciRunURL, fnName, fnArgs, constructorArgs)
 
 	out, err := scanDeployment(row)
 	if err != nil {
@@ -227,7 +231,7 @@ func (p *Postgres) RecordDeployment(ctx context.Context, d Deployment) (Deployme
 
 const historySQL = `
 SELECT id, alias, network, contract_id, wasm_hash, action,
-	deployer_pubkey, tx_hash, ledger, git_commit, dirty, fee_charged, notes, ci_run_url, fn_name, fn_args, created_at
+	deployer_pubkey, tx_hash, ledger, git_commit, dirty, fee_charged, notes, ci_run_url, fn_name, fn_args, constructor_args, created_at
 FROM deployments
 WHERE network = $1 AND alias = $2
 ORDER BY created_at DESC, id DESC`
@@ -263,7 +267,7 @@ func (p *Postgres) History(ctx context.Context, network, alias string) ([]Deploy
 
 const getDeploymentSQL = `
 SELECT id, alias, network, contract_id, wasm_hash, action,
-	deployer_pubkey, tx_hash, ledger, git_commit, dirty, fee_charged, notes, ci_run_url, fn_name, fn_args, created_at
+	deployer_pubkey, tx_hash, ledger, git_commit, dirty, fee_charged, notes, ci_run_url, fn_name, fn_args, constructor_args, created_at
 FROM deployments
 WHERE id = $1`
 
@@ -307,7 +311,7 @@ func (p *Postgres) HistoryPage(ctx context.Context, network, alias string, limit
 
 const listAllDeploymentsSQL = `
 SELECT id, alias, network, contract_id, wasm_hash, action,
-	deployer_pubkey, tx_hash, ledger, git_commit, dirty, fee_charged, notes, ci_run_url, fn_name, fn_args, created_at
+	deployer_pubkey, tx_hash, ledger, git_commit, dirty, fee_charged, notes, ci_run_url, fn_name, fn_args, constructor_args, created_at
 FROM deployments
 ORDER BY id`
 
@@ -374,12 +378,12 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		if _, err := tx.Exec(ctx, `
 INSERT INTO deployments (id, alias, network, contract_id, wasm_hash, action,
                          deployer_pubkey, tx_hash, ledger, git_commit, dirty, fee_charged,
-                         notes, ci_run_url, fn_name, fn_args, created_at)
+                         notes, ci_run_url, fn_name, fn_args, constructor_args, created_at)
 OVERRIDING SYSTEM VALUE
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
 			d.ID, d.Alias, d.Network, d.ContractID, d.WasmHash, string(d.Action),
 			d.DeployerPubkey, txHash, ledger, optionalText(d.GitCommit), dirty, d.FeeCharged,
-			optionalText(d.Notes), optionalText(d.CIRunURL), optionalText(d.FnName), optionalText(d.FnArgs), d.CreatedAt); err != nil {
+			optionalText(d.Notes), optionalText(d.CIRunURL), optionalText(d.FnName), optionalText(d.FnArgs), optionalText(d.ConstructorArgs), d.CreatedAt); err != nil {
 			return fmt.Errorf("postgres import deployment %d: %w", d.ID, err)
 		}
 	}
@@ -426,20 +430,21 @@ func scanContract(s scanner) (Contract, error) {
 
 func scanDeployment(s scanner) (Deployment, error) {
 	var (
-		d           Deployment
-		action      string
-		txHash      *string
-		ledger      *int64
-		txGitCommit *string
-		txDirty     *bool
-		txFee       *int64
-		notes       *string
-		ciRunURL    *string
-		fnName      *string
-		fnArgs      *string
+		d               Deployment
+		action          string
+		txHash          *string
+		ledger          *int64
+		txGitCommit     *string
+		txDirty         *bool
+		txFee           *int64
+		notes           *string
+		ciRunURL        *string
+		fnName          *string
+		fnArgs          *string
+		constructorArgs *string
 	)
 	err := s.Scan(&d.ID, &d.Alias, &d.Network, &d.ContractID, &d.WasmHash, &action,
-		&d.DeployerPubkey, &txHash, &ledger, &txGitCommit, &txDirty, &txFee, &notes, &ciRunURL, &fnName, &fnArgs, &d.CreatedAt)
+		&d.DeployerPubkey, &txHash, &ledger, &txGitCommit, &txDirty, &txFee, &notes, &ciRunURL, &fnName, &fnArgs, &constructorArgs, &d.CreatedAt)
 	if err != nil {
 		return Deployment{}, err
 	}
@@ -471,6 +476,9 @@ func scanDeployment(s scanner) (Deployment, error) {
 	}
 	if fnArgs != nil {
 		d.FnArgs = *fnArgs
+	}
+	if constructorArgs != nil {
+		d.ConstructorArgs = *constructorArgs
 	}
 	return d, nil
 }

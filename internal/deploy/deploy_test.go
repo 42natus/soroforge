@@ -59,6 +59,21 @@ type harnessOptions struct {
 	// catalog replaces the SoroVault registrar.
 	catalog catalog.Registrar
 
+	// upgradeNoop makes an accepted upgrade invocation leave the contract's
+	// bytecode untouched, as a buggy contract or a custom upgrade entrypoint
+	// that does something else would. newHarness otherwise keeps the mocked
+	// ledger truthful by applying the hash the invocation passed.
+	upgradeNoop bool
+
+	// verifyDelay overrides the wait between post-upgrade hash reads, so tests
+	// that exercise the retry do not sleep for seconds.
+	verifyDelay time.Duration
+
+	// log receives service logs. Tests that assert on what SoroForge reports
+	// (a skipped contract, for example) capture them here instead of
+	// discarding them.
+	log io.Writer
+
 	// progress receives deploy progress events, when set.
 	progress deploy.ProgressFunc
 
@@ -108,6 +123,9 @@ contracts:
 	contractID := testContractID(t)
 	client := stellar.NewMockClient()
 	client.SimulateResponse = simulationReturning(t, contractID)
+	if !opts.upgradeNoop {
+		installUpgradeEffect(t, client)
+	}
 
 	memStore := store.NewMemoryStore()
 
@@ -117,18 +135,23 @@ contracts:
 		signer = mockSigner
 	}
 
+	// Discard logs so test output stays readable, unless the test wants them.
+	logWriter := opts.log
+	if logWriter == nil {
+		logWriter = orIoDiscard(opts.logOut)
+	}
+
 	svc, err := deploy.New(deploy.Options{
 		Config:          cfg,
 		Store:           memStore,
 		Signer:          signer,
 		Clients:         func(string, config.Network) (stellar.Client, error) { return client, nil },
 		MaxContractSize: opts.maxContractSize,
-		// Discard logs so test output stays readable unless a test asks
-		// to capture them.
-		Log:      slog.New(slog.NewTextHandler(orIoDiscard(opts.logOut), nil)),
-		Catalog:  opts.catalog,
-		Progress: opts.progress,
-		Webhooks: opts.webhooks,
+		Log:             slog.New(slog.NewTextHandler(logWriter, nil)),
+		Catalog:         opts.catalog,
+		VerifyDelay:     opts.verifyDelay,
+		Progress:        opts.progress,
+		Webhooks:        opts.webhooks,
 	})
 	require.NoError(t, err)
 
@@ -140,6 +163,51 @@ contracts:
 		cfg:        cfg,
 		contractID: contractID,
 		wasmHash:   stellar.WasmHash([]byte(wasm)),
+	}
+}
+
+// installUpgradeEffect makes the mocked ledger apply what an accepted upgrade
+// transaction would do: point the invoked contract's instance at the WASM hash
+// the invocation passed.
+//
+// The read-back verification added to Upgrade makes this the default for the
+// harness; without it, every upgrade test would see the old hash forever. A
+// test that needs the buggy behaviour sets harnessOptions.upgradeNoop.
+func installUpgradeEffect(t *testing.T, client *stellar.MockClient) {
+	t.Helper()
+
+	client.AfterSend = func(_ context.Context, signedTxXDR string) {
+		var envelope xdr.TransactionEnvelope
+		require.NoError(t, xdr.SafeUnmarshalBase64(signedTxXDR, &envelope), "sent envelope must be valid XDR")
+		if envelope.V1 == nil {
+			return
+		}
+
+		for _, op := range envelope.V1.Tx.Operations {
+			invoke := op.Body.InvokeHostFunctionOp
+			if invoke == nil ||
+				invoke.HostFunction.Type != xdr.HostFunctionTypeHostFunctionTypeInvokeContract {
+				continue
+			}
+			call := invoke.HostFunction.InvokeContract
+			if call == nil || len(call.Args) == 0 || call.Args[0].Bytes == nil {
+				continue
+			}
+			if len(*call.Args[0].Bytes) != len(xdr.Hash{}) {
+				continue
+			}
+
+			address := call.ContractAddress
+			contractID, err := stellar.ContractIDFromScVal(xdr.ScVal{
+				Type:    xdr.ScValTypeScvAddress,
+				Address: &address,
+			})
+			require.NoError(t, err)
+
+			var hash xdr.Hash
+			copy(hash[:], *call.Args[0].Bytes)
+			require.NoError(t, client.SetContractInstance(contractID, hash))
+		}
 	}
 }
 
@@ -670,4 +738,184 @@ contracts:
 	require.NoError(t, err)
 	require.Len(t, history, 1)
 	assert.Contains(t, history[0].Notes, "uninitialised")
+}
+
+func TestDeployRequestConstructorArgsOverrideTheConfig(t *testing.T) {
+	// --arg and --args-file replace the config's constructor_args for one
+	// deploy, so the same alias can be instantiated differently per
+	// environment without editing shared config.
+	h := newHarness(t, harnessOptions{configBody: `
+version: 1
+default_network: testnet
+networks:
+  testnet:
+    rpc_url: https://rpc.example.org
+    passphrase: "Test SDF Network ; September 2015"
+contracts:
+  counter:
+    wasm: ./counter.wasm
+    constructor_args:
+      - {type: u32, value: 1}
+`})
+
+	result, err := h.svc.Deploy(context.Background(), deploy.DeployRequest{
+		Alias: "counter",
+		ConstructorArgs: []config.Arg{
+			{Type: config.ArgU32, Value: config.NewValue("2")},
+			{Type: config.ArgString, Value: config.NewValue("from the command line")},
+		},
+		DryRun: true,
+	})
+	require.NoError(t, err)
+
+	var decoded xdr.TransactionEnvelope
+	require.NoError(t, xdr.SafeUnmarshalBase64(result.CreateEnvelopeXDR, &decoded))
+
+	op := decoded.V1.Tx.Operations[0].Body.MustInvokeHostFunctionOp()
+	args := op.HostFunction.CreateContractV2.ConstructorArgs
+	require.Len(t, args, 2, "the override replaces the config value entirely")
+	assert.Equal(t, xdr.Uint32(2), *args[0].U32)
+	assert.Equal(t, xdr.ScString("from the command line"), *args[1].Str)
+}
+
+func TestDeployRequestConstructorArgsCanBeEmpty(t *testing.T) {
+	// A non-nil empty slice is an override: deploy with no arguments even
+	// though the config has some.
+	h := newHarness(t, harnessOptions{configBody: `
+version: 1
+default_network: testnet
+networks:
+  testnet:
+    rpc_url: https://rpc.example.org
+    passphrase: "Test SDF Network ; September 2015"
+contracts:
+  counter:
+    wasm: ./counter.wasm
+    constructor_args:
+      - {type: u32, value: 1}
+`})
+
+	result, err := h.svc.Deploy(context.Background(), deploy.DeployRequest{
+		Alias:           "counter",
+		ConstructorArgs: []config.Arg{},
+		DryRun:          true,
+	})
+	require.NoError(t, err)
+
+	var decoded xdr.TransactionEnvelope
+	require.NoError(t, xdr.SafeUnmarshalBase64(result.CreateEnvelopeXDR, &decoded))
+	op := decoded.V1.Tx.Operations[0].Body.MustInvokeHostFunctionOp()
+	assert.Empty(t, op.HostFunction.CreateContractV2.ConstructorArgs)
+}
+
+func TestDeployRecordsTheConstructorArgsUsed(t *testing.T) {
+	// The arguments actually used are recorded with the deployment, so the
+	// deploy can be reproduced after the config has moved on. They live in a
+	// dedicated constructor_args column, not in the free-form notes.
+	h := newHarness(t, harnessOptions{configBody: `
+version: 1
+default_network: testnet
+networks:
+  testnet:
+    rpc_url: https://rpc.example.org
+    passphrase: "Test SDF Network ; September 2015"
+contracts:
+  counter:
+    wasm: ./counter.wasm
+    constructor_args:
+      - {type: u32, value: 7}
+      - {type: string, value: "SoroForge"}
+`})
+
+	// Built the way the CLI builds it, so this covers the --arg path end to
+	// end (--arg u32:9).
+	arg, err := config.ParseArgFlag("u32:9")
+	require.NoError(t, err)
+
+	result, err := h.svc.Deploy(context.Background(), deploy.DeployRequest{
+		Alias:           "counter",
+		Notes:           "release 1.2.3",
+		ConstructorArgs: []config.Arg{arg},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, `[{"type":"u32","value":9}]`, result.ConstructorArgs)
+
+	history, err := h.store.History(context.Background(), "testnet", "counter")
+	require.NoError(t, err)
+	require.Len(t, history, 1)
+	assert.Equal(t, `[{"type":"u32","value":9}]`, history[0].ConstructorArgs,
+		"the recorded args must be the ones actually used, in typed JSON form")
+	assert.Equal(t, "release 1.2.3", history[0].Notes, "notes stay free-form")
+}
+
+func TestDeployRejectsInvalidRequestConstructorArgs(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+
+	_, err := h.svc.Deploy(context.Background(), deploy.DeployRequest{
+		Alias: "counter",
+		ConstructorArgs: []config.Arg{
+			{Type: config.ArgU32, Value: config.NewValue("not a number")},
+		},
+	})
+	assert.ErrorContains(t, err, "constructor args for counter")
+	assert.ErrorContains(t, err, "arg[0]")
+	assert.Zero(t, h.client.SendCount(), "a bad argument must not submit anything")
+}
+
+func TestDeployAppliesPerNetworkOverrides(t *testing.T) {
+	// The override resolution is shared by deploy, dry run, and status through
+	// Service.resolve, so a deploy to mainnet must use mainnet's arguments and
+	// salt while testnet keeps the contract defaults.
+	const saltMainnet = "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100"
+	h := newHarness(t, harnessOptions{configBody: `
+version: 1
+default_network: testnet
+networks:
+  testnet:
+    rpc_url: https://rpc.example.org
+    passphrase: "Test SDF Network ; September 2015"
+  mainnet:
+    rpc_url: https://mainnet.example.org
+    passphrase: "Public Global Stellar Network ; September 2015"
+contracts:
+  counter:
+    wasm: ./counter.wasm
+    constructor_args:
+      - {type: u32, value: 1}
+    networks:
+      mainnet:
+        constructor_args:
+          - {type: u32, value: 2}
+        salt: "` + saltMainnet + `"
+`})
+
+	result, err := h.svc.Deploy(context.Background(), deploy.DeployRequest{
+		Alias:   "counter",
+		Network: "mainnet",
+		DryRun:  true,
+	})
+	require.NoError(t, err)
+
+	var decoded xdr.TransactionEnvelope
+	require.NoError(t, xdr.SafeUnmarshalBase64(result.CreateEnvelopeXDR, &decoded))
+	op := decoded.V1.Tx.Operations[0].Body.MustInvokeHostFunctionOp()
+	require.Len(t, op.HostFunction.CreateContractV2.ConstructorArgs, 1)
+	assert.Equal(t, xdr.Uint32(2), *op.HostFunction.CreateContractV2.ConstructorArgs[0].U32)
+
+	expectedSalt, err := config.ParseSalt(saltMainnet)
+	require.NoError(t, err)
+	assert.Equal(t, xdr.Uint256(expectedSalt),
+		op.HostFunction.CreateContractV2.ContractIdPreimage.FromAddress.Salt)
+
+	// Testnet has no override, so it uses the contract's own arguments.
+	testnet, err := h.svc.Deploy(context.Background(), deploy.DeployRequest{
+		Alias:  "counter",
+		DryRun: true,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, xdr.SafeUnmarshalBase64(testnet.CreateEnvelopeXDR, &decoded))
+	op = decoded.V1.Tx.Operations[0].Body.MustInvokeHostFunctionOp()
+	require.Len(t, op.HostFunction.CreateContractV2.ConstructorArgs, 1)
+	assert.Equal(t, xdr.Uint32(1), *op.HostFunction.CreateContractV2.ConstructorArgs[0].U32)
 }

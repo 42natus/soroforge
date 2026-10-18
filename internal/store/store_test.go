@@ -268,8 +268,9 @@ func runStoreSuite(t *testing.T, newStore func(t *testing.T) store.Store) {
 	})
 
 	t.Run("optional deployment fields survive a round trip when absent", func(t *testing.T) {
-		// tx_hash, ledger, and notes are nullable; a dry run or a failed
-		// submission leaves them unset and reading them back must not error.
+		// tx_hash, ledger, notes, and constructor_args are nullable; a dry run
+		// or a failed submission leaves them unset and reading them back must
+		// not error.
 		s := newStore(t)
 
 		_, err := s.RecordDeployment(ctx, store.Deployment{
@@ -284,6 +285,29 @@ func runStoreSuite(t *testing.T, newStore func(t *testing.T) store.Store) {
 		assert.Empty(t, history[0].TxHash)
 		assert.Zero(t, history[0].Ledger)
 		assert.Empty(t, history[0].Notes)
+		assert.Empty(t, history[0].ConstructorArgs)
+	})
+
+	t.Run("constructor args survive a round trip exactly", func(t *testing.T) {
+		// The recorded arguments are what makes a deployment reproducible
+		// later, so they must come back byte-for-byte — a u128 beyond uint64
+		// is the value most likely to be mangled by a lossy store.
+		s := newStore(t)
+
+		const args = `[{"type":"u32","value":9},` +
+			`{"type":"u128","value":340282366920938463463374607431768211455}]`
+
+		_, err := s.RecordDeployment(ctx, store.Deployment{
+			Alias: "counter", Network: "testnet", ContractID: "C1", WasmHash: "a",
+			Action: store.ActionDeploy, DeployerPubkey: "GABC",
+			ConstructorArgs: args,
+		})
+		require.NoError(t, err)
+
+		history, err := s.History(ctx, "testnet", "counter")
+		require.NoError(t, err)
+		require.Len(t, history, 1)
+		assert.Equal(t, args, history[0].ConstructorArgs)
 	})
 
 	t.Run("an upload is recorded without a contract id", func(t *testing.T) {

@@ -58,6 +58,9 @@ func printDeployResult(r *deploy.DeployResult) error {
 	fmt.Fprintf(w, "  WASM hash     %s\n", r.WasmHash)
 	fmt.Fprintf(w, "  Network       %s\n", r.Network)
 	fmt.Fprintf(w, "  Deployer      %s\n", r.Deployer)
+	if r.ConstructorArgs != "" {
+		fmt.Fprintf(w, "  Constructor   %s\n", r.ConstructorArgs)
+	}
 	printWarnings(w, r.Warnings)
 
 	if r.UploadSkipped {
@@ -360,6 +363,60 @@ func printCatalog(w io.Writer, c *deploy.CatalogStatus) {
 		return
 	}
 	fmt.Fprintf(w, "  SoroVault     %s (%d functions)\n", c.Entry.URL, c.Entry.Functions)
+}
+
+// printDeployAll reports one batch deploy. It always prints every result —
+// including a failure — because the summary is how the caller learns what
+// succeeded before the run stopped.
+func printDeployAll(results []deploy.DeployAllResult) error {
+	if flags.jsonOutput {
+		return printJSON(results)
+	}
+
+	w := out()
+	if len(results) == 0 {
+		fmt.Fprintln(w, "No contracts were deployed.")
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "ALIAS\tSTATUS\tCONTRACT ID\tWASM HASH\tDETAIL")
+	for _, r := range results {
+		contractID, wasmHash, detail := "-", "-", ""
+		if r.Result != nil {
+			contractID = r.Result.ContractID
+			wasmHash = shortHash(r.Result.WasmHash)
+			if r.Result.DryRun {
+				detail = "nothing submitted"
+			} else if r.Result.UploadSkipped {
+				detail = "upload skipped"
+			}
+		}
+		switch r.Status {
+		case deploy.DeployAllSkipped:
+			detail = "already tracked"
+		case deploy.DeployAllFailed:
+			detail = r.Error
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", r.Alias, r.Status, contractID, wasmHash, detail)
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+
+	counts := map[string]int{}
+	for _, r := range results {
+		counts[r.Status]++
+	}
+	fmt.Fprintf(w, "\n%d deployed, %d simulated, %d skipped, %d failed.\n",
+		counts[deploy.DeployAllDeployed],
+		counts[deploy.DeployAllDryRun],
+		counts[deploy.DeployAllSkipped],
+		counts[deploy.DeployAllFailed])
+	if last := results[len(results)-1]; last.Status == deploy.DeployAllFailed {
+		fmt.Fprintf(w, "Stopped at %s; nothing after it was attempted.\n", last.Alias)
+	}
+	return nil
 }
 
 func printWebhooks(w io.Writer, webhooks []deploy.WebhookStatus) {

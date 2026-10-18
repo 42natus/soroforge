@@ -108,6 +108,70 @@ func TestUpgradeFuncDefaultAndOverride(t *testing.T) {
 	assert.Equal(t, "admin_upgrade", token.UpgradeFuncOrDefault())
 }
 
+const perNetworkConfig = `
+version: 1
+default_network: testnet
+networks:
+  testnet:
+    rpc_url: https://soroban-testnet.stellar.org
+    passphrase: "Test SDF Network ; September 2015"
+  mainnet:
+    rpc_url: https://mainnet.example.org
+    passphrase: "Public Global Stellar Network ; September 2015"
+contracts:
+  token:
+    wasm: ./out/token.wasm
+    constructor_args:
+      - {type: string, value: "default-admin"}
+    salt: "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+    networks:
+      mainnet:
+        constructor_args:
+          - {type: string, value: "mainnet-admin"}
+        salt: "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100"
+      testnet:
+        constructor_args: []
+`
+
+func TestForNetworkAppliesOverridesOnTopOfDefaults(t *testing.T) {
+	cfg, err := Load(writeConfig(t, perNetworkConfig))
+	require.NoError(t, err)
+
+	contract, err := cfg.Contract("token")
+	require.NoError(t, err)
+
+	mainnet := contract.ForNetwork("mainnet")
+	require.Len(t, mainnet.ConstructorArgs, 1)
+	value, err := mainnet.ConstructorArgs[0].Value.asString()
+	require.NoError(t, err)
+	assert.Equal(t, "mainnet-admin", value)
+	assert.Equal(t,
+		"ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100",
+		mainnet.Salt)
+
+	// An explicit empty list is an override, not an absence of one: testnet
+	// deploys with no constructor arguments even though the contract has one.
+	testnet := contract.ForNetwork("testnet")
+	assert.Empty(t, testnet.ConstructorArgs)
+	assert.Equal(t, contract.Salt, testnet.Salt, "an unset field inherits the contract default")
+
+	// The original contract value is untouched; resolution returns a copy.
+	assert.Equal(t, contract.ConstructorArgs, contract.ForNetwork("nonexistent").ConstructorArgs)
+}
+
+func TestForNetworkWithoutOverridesReturnsDefaults(t *testing.T) {
+	cfg, err := Load(writeConfig(t, validConfig))
+	require.NoError(t, err)
+
+	counter, err := cfg.Contract("counter")
+	require.NoError(t, err)
+
+	resolved := counter.ForNetwork("mainnet")
+	assert.Equal(t, counter.Wasm, resolved.Wasm)
+	assert.Equal(t, counter.UpgradeFunc, resolved.UpgradeFunc)
+	assert.Equal(t, counter.ConstructorArgs, resolved.ConstructorArgs)
+}
+
 func TestWasmPathResolvesRelativeToConfigFile(t *testing.T) {
 	// A relative wasm path must mean "relative to the project", not "relative
 	// to whatever directory the shell happens to be in".
@@ -344,6 +408,58 @@ contracts:
     salt: "abcd"
 `,
 			wantErr: "salt",
+		},
+		"unknown network in override": {
+			config: `
+version: 1
+default_network: testnet
+networks:
+  testnet:
+    rpc_url: https://rpc.example.org
+    passphrase: "Test SDF Network ; September 2015"
+contracts:
+  counter:
+    wasm: ./c.wasm
+    networks:
+      staging:
+        salt: "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+`,
+			wantErr: "contracts.counter.networks.staging: unknown network (configured: testnet)",
+		},
+		"invalid constructor arg inside override": {
+			config: `
+version: 1
+default_network: testnet
+networks:
+  testnet:
+    rpc_url: https://rpc.example.org
+    passphrase: "Test SDF Network ; September 2015"
+contracts:
+  counter:
+    wasm: ./c.wasm
+    networks:
+      testnet:
+        constructor_args:
+          - {type: u32, value: "not a number"}
+`,
+			wantErr: "contracts.counter.networks.testnet.constructor_args[0]",
+		},
+		"invalid salt inside override": {
+			config: `
+version: 1
+default_network: testnet
+networks:
+  testnet:
+    rpc_url: https://rpc.example.org
+    passphrase: "Test SDF Network ; September 2015"
+contracts:
+  counter:
+    wasm: ./c.wasm
+    networks:
+      testnet:
+        salt: "abcd"
+`,
+			wantErr: "contracts.counter.networks.testnet.salt",
 		},
 		"default_network not configured": {
 			config: `

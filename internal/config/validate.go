@@ -47,7 +47,7 @@ func (c *Config) Validate() error {
 		problems = append(problems, "contracts: at least one contract must be configured")
 	}
 	for _, alias := range sortedKeys(c.Contracts) {
-		problems = append(problems, validateContract(alias, c.Contracts[alias])...)
+		problems = append(problems, validateContract(alias, c.Contracts[alias], c.Networks)...)
 	}
 
 	if len(problems) == 0 {
@@ -115,7 +115,7 @@ func validateNetwork(name string, n Network) []string {
 	return problems
 }
 
-func validateContract(alias string, c Contract) []string {
+func validateContract(alias string, c Contract, networks map[string]Network) []string {
 	var problems []string
 	prefix := fmt.Sprintf("contracts.%s", alias)
 
@@ -150,6 +150,37 @@ func validateContract(alias string, c Contract) []string {
 	if c.Salt != "" {
 		if _, err := ParseSalt(c.Salt); err != nil {
 			problems = append(problems, fmt.Sprintf("%s.salt: %v", prefix, err))
+		}
+	}
+
+	// Overrides are validated in their own context, with the full path
+	// (`contracts.token.networks.mainnet.salt`) so a bad override cannot be
+	// mistaken for the contract-level setting it replaces.
+	for _, network := range sortedKeys(c.Networks) {
+		problems = append(problems, validateContractOverride(prefix, network, c.Networks[network], networks)...)
+	}
+
+	return problems
+}
+
+func validateContractOverride(prefix, network string, o ContractOverride, networks map[string]Network) []string {
+	var problems []string
+	overridePrefix := fmt.Sprintf("%s.networks.%s", prefix, network)
+
+	if _, ok := networks[network]; !ok {
+		problems = append(problems, fmt.Sprintf(
+			"%s: unknown network (configured: %s)", overridePrefix, joinKeys(networks)))
+	}
+
+	for i, arg := range o.ConstructorArgs {
+		if _, err := arg.ToScVal(); err != nil {
+			problems = append(problems, fmt.Sprintf("%s.constructor_args[%d]: %v", overridePrefix, i, err))
+		}
+	}
+
+	if o.Salt != "" {
+		if _, err := ParseSalt(o.Salt); err != nil {
+			problems = append(problems, fmt.Sprintf("%s.salt: %v", overridePrefix, err))
 		}
 	}
 

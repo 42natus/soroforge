@@ -105,6 +105,11 @@ type Deployment struct {
 	// Notes is free-form operator context, e.g. a ticket or release tag.
 	Notes string `json:"notes,omitempty"`
 
+	// ConstructorArgs records the typed constructor arguments a deploy used,
+	// as JSON in the same shape as soroforge.yaml. Empty for upgrades, which
+	// take none, and for deploys with no arguments.
+	ConstructorArgs string `json:"constructor_args,omitempty"`
+
 	// CIRunURL is the CI pipeline run URL when deployed from GitHub Actions or
 	// GitLab CI. Outside CI this is empty. It answers "which commit and merge
 	// triggered this deploy" for audit purposes.
