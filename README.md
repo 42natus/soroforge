@@ -110,6 +110,59 @@ nothing is recorded.
 
 ---
 
+## Install
+
+### Release binaries
+
+Download the archive for your platform from the
+[latest release](https://github.com/soroworks/soroforge/releases/latest).
+Each archive ships with an SPDX SBOM (`<archive>.sbom.json`) listing what went
+into it, and every archive, SBOM and binary carries a GitHub build-provenance
+attestation tying it to the release workflow run and commit that built it.
+
+SoroForge holds deployer keys, so verify what you run before you run it, using
+the [GitHub CLI](https://cli.github.com/):
+
+```bash
+gh attestation verify soroforge_<version>_linux_amd64.tar.gz -R soroworks/soroforge
+
+# The extracted binary verifies the same way:
+tar xzf soroforge_<version>_linux_amd64.tar.gz
+gh attestation verify soroforge -R soroworks/soroforge
+```
+
+`checksums.txt` in the release still lists SHA-256 sums for every archive and
+SBOM.
+
+### Container image
+
+Each release publishes a multi-arch image (linux/amd64, linux/arm64) to GitHub
+Container Registry, built from the same commit and binary as the release
+archives:
+
+```bash
+docker pull ghcr.io/soroworks/soroforge:latest      # or a version, e.g. :0.3.0
+docker run --rm ghcr.io/soroworks/soroforge:latest version
+```
+
+Run the HTTP API from your project directory. Inside a container the server must
+listen on all interfaces, so set `SOROFORGE_API_ADDR` explicitly and publish the
+port only where you need it:
+
+```bash
+docker run --rm -p 127.0.0.1:8080:8080 \
+  -v "$PWD:/work" -w /work \
+  -e DATABASE_URL -e SOROFORGE_SECRET_KEY -e SOROFORGE_API_TOKEN \
+  -e SOROFORGE_API_ADDR=0.0.0.0:8080 \
+  ghcr.io/soroworks/soroforge:latest serve
+```
+
+The image runs as a non-root user and contains no secrets; pass them through the
+environment or mount a keystore file (`SOROFORGE_KEYSTORE_PATH`). Pin a version
+tag in Kubernetes or Compose rather than `:latest`.
+
+---
+
 ## Quickstart — deploy to testnet
 
 **Prerequisites:** Go 1.26+ (required by `modernc.org/sqlite`, the SQLite
@@ -283,6 +336,8 @@ contract already exists there and stops with an actionable message — naming th
 address and suggesting `soroforge upgrade` or a different salt — rather than
 paying for an upload and failing later in simulation.
 
+**Stellar Asset Contracts.** Projects using classic Stellar assets can declare `asset: CODE:ISSUER` or `asset: native` instead of `wasm:`. SoroForge deterministically derives the SAC contract ID, deploys the contract (or records the existing one if already live on-chain), and tracks its drift status. Because SACs are protocol-native contracts without uploaded bytecode, `soroforge upgrade` refuses them clearly.
+
 **`networks`** overrides `constructor_args` and `salt` for one network: the
 per-network value wins when that network is deployed to, and the contract-level
 value is the default everywhere else (`wasm` and `upgrade_fn` are not
@@ -394,6 +449,7 @@ contracts:
 | `SOROFORGE_MAX_CONTRACT_SIZE` | Override the network's contract WASM size limit, in bytes. |
 | `SOROFORGE_API_TOKEN` | Read-write bearer token for `serve`. |
 | `SOROFORGE_API_TOKENS` | Scoped bearer tokens for `serve`, as `name:scope:token` entries — see below. |
+| `SOROFORGE_API_CORS_ORIGINS` | Comma-separated exact origins allowed to call `serve` from a browser. Unset (default) sends no CORS headers. |
 | `SOROFORGE_API_ADDR` | Listen address (default `127.0.0.1:8080`). |
 | `SOROFORGE_TLS_CERT` / `SOROFORGE_TLS_KEY` | PEM certificate and matching private-key paths; must be set together. |
 | `SOROFORGE_API_RATE_LIMIT` | Sustained per-client API rate (default `10` requests/second; `0` disables). |
@@ -403,6 +459,22 @@ contracts:
 | `SOROFORGE_CONFIG` | Config file path (default `./soroforge.yaml`). |
 | `TEST_DATABASE_URL` | Enables Postgres integration tests. |
 | `SOROFORGE_LIVE` | Enables the live testnet smoke tests. |
+
+**Browser dashboards (CORS).** By default the API sends no CORS headers, so
+only same-origin or non-browser clients can call it. Set
+`SOROFORGE_API_CORS_ORIGINS` to a comma-separated list of the exact origins
+your dashboard is served from to allow cross-origin calls:
+
+```bash
+SOROFORGE_API_CORS_ORIGINS="https://dash.example.com,https://ops.example.com"
+```
+
+This is an explicit, narrow opt-in on purpose: the API can deploy contracts
+with the configured signing key, so `*` is rejected with an error at startup —
+every origin must be listed exactly, as `scheme://host[:port]` with no path,
+trailing slash, or wildcard. Preflight requests are answered without a bearer
+token (browsers never send one); actual requests still require authentication
+regardless of origin.
 
 ---
 
@@ -637,6 +709,22 @@ name:
 The bearer token value, request bodies, and key material are never logged.
 `/health` is logged at `debug` only, so a liveness probe polling every second
 does not flood the log.
+
+### Kubernetes & Helm
+
+A Helm chart for deploying `soroforge serve` is provided under [`deploy/helm/soroforge`](deploy/helm/soroforge).
+
+- Runs database migrations as a pre-install/pre-upgrade hook (`soroforge migrate up`).
+- Executes as non-root (`runAsNonRoot: true`, UID 65532) with a read-only root filesystem and an `emptyDir` on `/tmp`.
+- Service defaults to `ClusterIP`.
+- Reads `DATABASE_URL`, `SOROFORGE_SECRET_KEY`, and API tokens from existing Kubernetes Secrets (never plain values).
+- Mounts `soroforge.yaml` from a ConfigMap.
+- Configures `/health` (liveness) and `/ready` (readiness) probes.
+
+```bash
+helm install soroforge deploy/helm/soroforge \
+  --set secrets.existingSecret=soroforge-secrets
+```
 
 ### Async jobs
 

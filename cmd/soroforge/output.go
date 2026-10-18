@@ -32,6 +32,9 @@ func printJSON(v any) error {
 // shortHash abbreviates a 64-character hash for table output. The full value is
 // always available with --json, so the table optimises for scanning.
 func shortHash(hash string) string {
+	if hash == "stellar_asset" {
+		return hash
+	}
 	const shown = 12
 	if len(hash) <= shown {
 		return hash

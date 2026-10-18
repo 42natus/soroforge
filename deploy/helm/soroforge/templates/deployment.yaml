@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "soroforge.fullname" . }}
+  labels:
+    {{- include "soroforge.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "soroforge.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "soroforge.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "soroforge.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["serve"]
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: SOROFORGE_CONFIG
+              value: /etc/soroforge/soroforge.yaml
+            - name: SOROFORGE_API_ADDR
+              value: {{ .Values.env.SOROFORGE_API_ADDR | default "0.0.0.0:8080" | quote }}
+            - name: SOROFORGE_LOG_FORMAT
+              value: {{ .Values.env.SOROFORGE_LOG_FORMAT | default "json" | quote }}
+            {{- $dbSecret := default .Values.secrets.existingSecret .Values.secrets.databaseUrl.secretName }}
+            {{- if $dbSecret }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $dbSecret }}
+                  key: {{ .Values.secrets.databaseUrl.key | default "DATABASE_URL" }}
+            {{- end }}
+            {{- $signSecret := default .Values.secrets.existingSecret .Values.secrets.signingKey.secretName }}
+            {{- if $signSecret }}
+            - name: SOROFORGE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $signSecret }}
+                  key: {{ .Values.secrets.signingKey.key | default "SOROFORGE_SECRET_KEY" }}
+            {{- end }}
+            {{- $apiSecret := default .Values.secrets.existingSecret .Values.secrets.apiToken.secretName }}
+            {{- if and $apiSecret .Values.secrets.apiToken.key }}
+            - name: SOROFORGE_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $apiSecret }}
+                  key: {{ .Values.secrets.apiToken.key }}
+            {{- end }}
+            {{- $tokensSecret := default .Values.secrets.existingSecret .Values.secrets.apiTokens.secretName }}
+            {{- if and $tokensSecret .Values.secrets.apiTokens.key }}
+            - name: SOROFORGE_API_TOKENS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $tokensSecret }}
+                  key: {{ .Values.secrets.apiTokens.key }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/soroforge/soroforge.yaml
+              subPath: soroforge.yaml
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: {{ default (printf "%s-config" (include "soroforge.fullname" .)) .Values.config.existingConfigMap }}
+        - name: tmp
+          emptyDir: {}

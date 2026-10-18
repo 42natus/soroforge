@@ -136,6 +136,11 @@ type Contract struct {
 	// config file's directory unless absolute.
 	Wasm string `yaml:"wasm"`
 
+	// Asset declares a classic Stellar asset whose built-in Stellar Asset
+	// Contract (SAC) SoroForge should deploy and track, e.g. "native" or
+	// "CODE:ISSUER". Mutually exclusive with Wasm.
+	Asset string `yaml:"asset"`
+
 	// ConstructorArgs are passed to the contract's constructor at
 	// instantiation. Empty is valid and common. A network override may
 	// replace them for one network.
@@ -201,6 +206,11 @@ func (c Contract) ForNetwork(network string) Contract {
 		c.Salt = override.Salt
 	}
 	return c
+}
+
+// IsSAC reports whether the contract config declares a Stellar Asset Contract.
+func (c Contract) IsSAC() bool {
+	return c.Asset != ""
 }
 
 // UpgradeFuncOrDefault returns the configured upgrade entrypoint, falling back

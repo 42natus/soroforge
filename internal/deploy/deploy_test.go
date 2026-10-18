@@ -919,3 +919,127 @@ contracts:
 	require.Len(t, op.HostFunction.CreateContractV2.ConstructorArgs, 1)
 	assert.Equal(t, xdr.Uint32(1), *op.HostFunction.CreateContractV2.ConstructorArgs[0].U32)
 }
+
+func TestDeploySAC(t *testing.T) {
+	h := newHarness(t, harnessOptions{configBody: `
+version: 1
+default_network: testnet
+networks:
+  testnet:
+    rpc_url: https://rpc.example.org
+    passphrase: "Test SDF Network ; September 2015"
+contracts:
+  xlm:
+    asset: native
+`})
+
+	result, err := h.svc.Deploy(context.Background(), deploy.DeployRequest{
+		Alias: "xlm",
+		Notes: "ticket-123",
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "xlm", result.Alias)
+	assert.Equal(t, "testnet", result.Network)
+	assert.Equal(t, "stellar_asset", result.WasmHash)
+	assert.True(t, result.UploadSkipped)
+	assert.NotEmpty(t, result.ContractID)
+	assert.NotEmpty(t, result.CreateTxHash)
+
+	// Verify the deterministic SAC ID matches what stellar.ContractIDFromAsset produces.
+	native, err := stellar.ParseAsset("native")
+	require.NoError(t, err)
+	expectedID, err := stellar.ContractIDFromAsset(native, "Test SDF Network ; September 2015")
+	require.NoError(t, err)
+	assert.Equal(t, expectedID, result.ContractID)
+
+	// Check that one transaction was sent (create SAC, no upload).
+	assert.Equal(t, 1, h.client.SendCount())
+	assert.Equal(t, 1, h.signer.SignCount())
+
+	// Check store record has notes and stellar_asset as wasm_hash.
+	history, err := h.store.History(context.Background(), "testnet", "xlm")
+	require.NoError(t, err)
+	require.Len(t, history, 1)
+	assert.Equal(t, "stellar_asset", history[0].WasmHash)
+	assert.Equal(t, "asset: native; ticket-123", history[0].Notes)
+	assert.Equal(t, expectedID, history[0].ContractID)
+
+	tracked, err := h.store.GetContract(context.Background(), "testnet", "xlm")
+	require.NoError(t, err)
+	assert.Equal(t, "stellar_asset", tracked.CurrentWasmHash)
+	assert.Equal(t, expectedID, tracked.ContractID)
+}
+
+func TestDeploySACAlreadyDeployed(t *testing.T) {
+	h := newHarness(t, harnessOptions{configBody: `
+version: 1
+default_network: testnet
+networks:
+  testnet:
+    rpc_url: https://rpc.example.org
+    passphrase: "Test SDF Network ; September 2015"
+contracts:
+  xlm:
+    asset: native
+`})
+
+	native, err := stellar.ParseAsset("native")
+	require.NoError(t, err)
+	sacID, err := stellar.ContractIDFromAsset(native, "Test SDF Network ; September 2015")
+	require.NoError(t, err)
+
+	// Mark SAC as already present on-chain.
+	require.NoError(t, h.client.SetSACInstance(sacID))
+
+	result, err := h.svc.Deploy(context.Background(), deploy.DeployRequest{
+		Alias: "xlm",
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, sacID, result.ContractID)
+	assert.Equal(t, "stellar_asset", result.WasmHash)
+	assert.True(t, result.UploadSkipped)
+	assert.Empty(t, result.CreateTxHash, "no transaction should be sent if already deployed")
+	assert.Equal(t, 0, h.client.SendCount())
+
+	// Recorded in store.
+	history, err := h.store.History(context.Background(), "testnet", "xlm")
+	require.NoError(t, err)
+	require.Len(t, history, 1)
+	assert.Equal(t, "asset: native", history[0].Notes)
+}
+
+func TestDeploySACDryRun(t *testing.T) {
+	h := newHarness(t, harnessOptions{configBody: `
+version: 1
+default_network: testnet
+networks:
+  testnet:
+    rpc_url: https://rpc.example.org
+    passphrase: "Test SDF Network ; September 2015"
+contracts:
+  xlm:
+    asset: native
+`})
+
+	result, err := h.svc.Deploy(context.Background(), deploy.DeployRequest{
+		Alias:  "xlm",
+		DryRun: true,
+	})
+	require.NoError(t, err)
+
+	assert.True(t, result.DryRun)
+	assert.NotEmpty(t, result.ContractID)
+	assert.Equal(t, "stellar_asset", result.WasmHash)
+	assert.NotEmpty(t, result.CreateEnvelopeXDR)
+	assert.Equal(t, 0, h.client.SendCount())
+	assert.Equal(t, 0, h.signer.SignCount())
+
+	// Verify the create envelope is CreateContract with preimage from asset.
+	var env xdr.TransactionEnvelope
+	require.NoError(t, xdr.SafeUnmarshalBase64(result.CreateEnvelopeXDR, &env))
+	op := env.V1.Tx.Operations[0].Body.MustInvokeHostFunctionOp()
+	assert.Equal(t, xdr.HostFunctionTypeHostFunctionTypeCreateContract, op.HostFunction.Type)
+	assert.Equal(t, xdr.ContractIdPreimageTypeContractIdPreimageFromAsset, op.HostFunction.CreateContract.ContractIdPreimage.Type)
+}

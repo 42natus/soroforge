@@ -1,0 +1,5 @@
+target/
+out1/
+out2/
+!v1.wasm
+!v2.wasm

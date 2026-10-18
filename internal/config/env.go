@@ -2,7 +2,7 @@ package config
 
 import (
 	"fmt"
-	"math"
+	"net/url"
 	"os"
 	"runtime"
 	"strconv"
@@ -66,26 +66,13 @@ const (
 	// EnvAPIAddr overrides the HTTP API listen address.
 	EnvAPIAddr = "SOROFORGE_API_ADDR"
 
-	// EnvTLSCert is the path to a PEM certificate for serving the HTTP API
-	// over TLS. It must be set together with EnvTLSKey.
-	EnvTLSCert = "SOROFORGE_TLS_CERT"
-
-	// EnvTLSKey is the path to the PEM private key matching EnvTLSCert.
-	EnvTLSKey = "SOROFORGE_TLS_KEY"
-
-	// EnvAPIRateLimit is the sustained per-client request rate for the HTTP
-	// API, in requests per second. Unset means DefaultAPIRateLimit; 0 disables
-	// limiting.
-	EnvAPIRateLimit = "SOROFORGE_API_RATE_LIMIT"
-
-	// EnvAPIRateBurst is how many requests a client may make at once before
-	// EnvAPIRateLimit applies. Unset means DefaultAPIRateBurst.
-	EnvAPIRateBurst = "SOROFORGE_API_RATE_BURST"
-
-	// EnvAPITrustProxy makes the rate limiter take the client IP from
-	// X-Forwarded-For. Enable it only when a reverse proxy you control is the
-	// sole way in.
-	EnvAPITrustProxy = "SOROFORGE_API_TRUST_PROXY"
+	// EnvAPICORSOrigins lists the exact browser origins allowed to call the
+	// HTTP API from another origin, as a comma-separated list such as
+	// "https://dash.example.com,https://ops.example.com". Unset (the default)
+	// means the API sends no CORS headers at all. Because the API can deploy
+	// contracts with the configured signing key, wildcards are rejected — see
+	// ParseCORSOrigins and ValidateCORSOrigin.
+	EnvAPICORSOrigins = "SOROFORGE_API_CORS_ORIGINS"
 
 	// EnvLogFormat selects the logging handler: "text" (default) or "json".
 	// JSON is for CI and log aggregators that index structured fields.
@@ -124,6 +111,7 @@ type Env struct {
 	APIToken        string
 	APITokens       string
 	APIAddr         string
+	APICORSOrigins  string
 	LogFormat       string
 	APIRateLimit    string
 	APIRateBurst    string
@@ -140,23 +128,75 @@ type Env struct {
 // via RequireDatabaseURL or SigningSeed.
 func LoadEnv() Env {
 	return Env{
-		DatabaseURL:           strings.TrimSpace(os.Getenv(EnvDatabaseURL)),
-		SecretKey:             strings.TrimSpace(os.Getenv(EnvSecretKey)),
-		KeystorePath:          strings.TrimSpace(os.Getenv(EnvKeystorePath)),
-		SignerCommand:         strings.TrimSpace(os.Getenv(EnvSignerCommand)),
-		SignerPublicKey:       strings.TrimSpace(os.Getenv(EnvSignerPublicKey)),
-		MaxContractSize:       strings.TrimSpace(os.Getenv(EnvMaxContractSize)),
-		APIToken:              os.Getenv(EnvAPIToken),
-		APITokens:             strings.TrimSpace(os.Getenv(EnvAPITokens)),
-		APIAddr:               strings.TrimSpace(os.Getenv(EnvAPIAddr)),
-		LogFormat:             strings.ToLower(strings.TrimSpace(os.Getenv(EnvLogFormat))),
-		AllowInsecureKeystore: envBool(os.Getenv(EnvAllowInsecureKeystore)),
-		APIRateLimit:          strings.TrimSpace(os.Getenv(EnvAPIRateLimit)),
-		APIRateBurst:          strings.TrimSpace(os.Getenv(EnvAPIRateBurst)),
-		APITrustProxy:         strings.TrimSpace(os.Getenv(EnvAPITrustProxy)),
-		TLSCert:               strings.TrimSpace(os.Getenv(EnvTLSCert)),
-		TLSKey:                strings.TrimSpace(os.Getenv(EnvTLSKey)),
+		DatabaseURL:     strings.TrimSpace(os.Getenv(EnvDatabaseURL)),
+		SecretKey:       strings.TrimSpace(os.Getenv(EnvSecretKey)),
+		KeystorePath:    strings.TrimSpace(os.Getenv(EnvKeystorePath)),
+		SignerCommand:   strings.TrimSpace(os.Getenv(EnvSignerCommand)),
+		SignerPublicKey: strings.TrimSpace(os.Getenv(EnvSignerPublicKey)),
+		MaxContractSize: strings.TrimSpace(os.Getenv(EnvMaxContractSize)),
+		APIToken:        os.Getenv(EnvAPIToken),
+		APITokens:       strings.TrimSpace(os.Getenv(EnvAPITokens)),
+		APIAddr:         strings.TrimSpace(os.Getenv(EnvAPIAddr)),
+		APICORSOrigins:  strings.TrimSpace(os.Getenv(EnvAPICORSOrigins)),
+		LogFormat:       strings.ToLower(strings.TrimSpace(os.Getenv(EnvLogFormat))),
 	}
+}
+
+// ParseCORSOrigins splits EnvAPICORSOrigins's comma-separated value into
+// validated exact origins. Empty input yields no origins, which is how CORS
+// stays opt-in: an unset variable must produce exactly today's behaviour of no
+// CORS headers at all. Entries are trimmed and empty ones skipped, so a
+// trailing comma or spaces around the list are harmless rather than a startup
+// failure. An invalid entry is an error, so a typo cannot silently disable or
+// silently widen the policy.
+func ParseCORSOrigins(raw string) ([]string, error) {
+	var origins []string
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if err := ValidateCORSOrigin(entry); err != nil {
+			return nil, err
+		}
+		origins = append(origins, entry)
+	}
+	return origins, nil
+}
+
+// ValidateCORSOrigin reports whether origin is an exact origin — scheme, host,
+// optional port, nothing else — that a dashboard could be served from.
+//
+// The rules are deliberately strict because this API can deploy contracts with
+// the configured signing key. "*" (or a wildcard anywhere in an entry) would
+// let any page a user visits drive the API from the browser, so cross-origin
+// access must be a narrow, explicit opt-in; the error says so rather than
+// quietly accepting it. Paths, queries, and trailing slashes are refused
+// because browsers compare origins exactly — accepting them would configure a
+// list that never matches, with CORS silently off.
+//
+// It is exported because api.NewRouter holds Options.CORSOrigins to the same
+// rules: a server must refuse a wildcard from either entry point, not only
+// from the environment variable.
+func ValidateCORSOrigin(origin string) error {
+	if strings.Contains(origin, "*") {
+		return fmt.Errorf(
+			"%s must not contain \"*\": list the exact origins the dashboard is served from",
+			EnvAPICORSOrigins)
+	}
+
+	u, err := url.Parse(origin)
+	switch {
+	case err != nil || u.Opaque != "" || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "":
+		return fmt.Errorf(
+			"%s: %q is not a valid origin: expected scheme://host[:port] (e.g. https://dash.example.com)",
+			EnvAPICORSOrigins, origin)
+	case u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil:
+		return fmt.Errorf(
+			"%s: %q is not a valid origin: an origin has no path, query, or trailing slash",
+			EnvAPICORSOrigins, origin)
+	}
+	return nil
 }
 
 // RequireDatabaseURL returns the configured database URL, or an error naming
@@ -385,22 +425,17 @@ func (e Env) MaxContractSizeBytes(def int) (int, error) {
 // fixed placeholder, and the database URL keeps only its shape.
 func (e Env) Redacted() map[string]string {
 	return map[string]string{
-		EnvDatabaseURL:           redact(e.DatabaseURL),
-		EnvSecretKey:             redact(e.SecretKey),
-		EnvKeystorePath:          e.KeystorePath,          // a path is not itself a secret
-		EnvSignerCommand:         redact(e.SignerCommand), // arguments may embed credentials
-		EnvSignerPublicKey:       e.SignerPublicKey,       // a public key is not a secret
-		EnvMaxContractSize:       e.MaxContractSize,
-		EnvAPIToken:              redact(e.APIToken),
-		EnvAPITokens:             redact(e.APITokens),
-		EnvAPIAddr:               e.ListenAddr(),
-		EnvLogFormat:             e.LogFormat,
-		EnvAllowInsecureKeystore: fmt.Sprintf("%t", e.AllowInsecureKeystore),
-		EnvAPIRateLimit:          orDefault(e.APIRateLimit, "(default)"),
-		EnvAPIRateBurst:          orDefault(e.APIRateBurst, "(default)"),
-		EnvAPITrustProxy:         orDefault(e.APITrustProxy, "false"),
-		EnvTLSCert:               e.TLSCert, // a path is not itself a secret
-		EnvTLSKey:                e.TLSKey,
+		EnvDatabaseURL:     redact(e.DatabaseURL),
+		EnvSecretKey:       redact(e.SecretKey),
+		EnvKeystorePath:    e.KeystorePath,          // a path is not itself a secret
+		EnvSignerCommand:   redact(e.SignerCommand), // arguments may embed credentials
+		EnvSignerPublicKey: e.SignerPublicKey,       // a public key is not a secret
+		EnvMaxContractSize: e.MaxContractSize,
+		EnvAPIToken:        redact(e.APIToken),
+		EnvAPITokens:       redact(e.APITokens),
+		EnvAPIAddr:         e.ListenAddr(),
+		EnvAPICORSOrigins:  e.APICORSOrigins, // origins are public, not secrets
+		EnvLogFormat:       e.LogFormat,
 	}
 }
 

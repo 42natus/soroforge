@@ -1,0 +1,53 @@
+{{- if .Values.migration.enabled -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "soroforge.fullname" . }}-migrate
+  labels:
+    {{- include "soroforge.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-delete-policy": {{ .Values.migration.hookDeletePolicy | default "before-hook-creation,hook-succeeded" | quote }}
+    "helm.sh/hook-weight": "-1"
+spec:
+  template:
+    metadata:
+      labels:
+        {{- include "soroforge.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "soroforge.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["migrate", "up"]
+          env:
+            {{- $dbSecret := default .Values.secrets.existingSecret .Values.secrets.databaseUrl.secretName }}
+            {{- if $dbSecret }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $dbSecret }}
+                  key: {{ .Values.secrets.databaseUrl.key | default "DATABASE_URL" }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.migration.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}

@@ -474,6 +474,66 @@ contracts:
 `,
 			wantErr: "is not one of the configured networks",
 		},
+		"wasm and asset mutually exclusive": {
+			config: `
+version: 1
+default_network: testnet
+networks:
+  testnet:
+    rpc_url: https://rpc.example.org
+    passphrase: "Test SDF Network ; September 2015"
+contracts:
+  sac:
+    wasm: ./c.wasm
+    asset: native
+`,
+			wantErr: "wasm and asset are mutually exclusive",
+		},
+		"invalid asset format": {
+			config: `
+version: 1
+default_network: testnet
+networks:
+  testnet:
+    rpc_url: https://rpc.example.org
+    passphrase: "Test SDF Network ; September 2015"
+contracts:
+  sac:
+    asset: "INVALID:ASSET:FORMAT"
+`,
+			wantErr: "contracts.sac.asset",
+		},
+		"sac with constructor args": {
+			config: `
+version: 1
+default_network: testnet
+networks:
+  testnet:
+    rpc_url: https://rpc.example.org
+    passphrase: "Test SDF Network ; September 2015"
+contracts:
+  sac:
+    asset: native
+    constructor_args:
+      - {type: u32, value: 42}
+`,
+			wantErr: "Stellar Asset Contracts do not take constructor args",
+		},
+		"sac with salt": {
+			config: `
+version: 1
+default_network: testnet
+networks:
+  testnet:
+    rpc_url: https://rpc.example.org
+    passphrase: "Test SDF Network ; September 2015"
+contracts:
+  sac:
+    asset: native
+    salt: "0000000000000000000000000000000000000000000000000000000000000001"
+`,
+			wantErr: "salt cannot be used",
+		},
 	}
 
 	for name, tc := range tests {
@@ -482,6 +542,34 @@ contracts:
 			assert.ErrorContains(t, err, tc.wantErr)
 		})
 	}
+}
+
+func TestValidateAcceptsSAC(t *testing.T) {
+	config := `
+version: 1
+default_network: testnet
+networks:
+  testnet:
+    rpc_url: https://rpc.example.org
+    passphrase: "Test SDF Network ; September 2015"
+contracts:
+  xlm:
+    asset: native
+  usdc:
+    asset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+`
+	cfg, err := Load(writeConfig(t, config))
+	require.NoError(t, err)
+
+	xlm, err := cfg.Contract("xlm")
+	require.NoError(t, err)
+	assert.True(t, xlm.IsSAC())
+	assert.Equal(t, "native", xlm.Asset)
+
+	usdc, err := cfg.Contract("usdc")
+	require.NoError(t, err)
+	assert.True(t, usdc.IsSAC())
+	assert.Equal(t, "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN", usdc.Asset)
 }
 
 func TestValidateAcceptsMissingWasmFile(t *testing.T) {

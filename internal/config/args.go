@@ -33,8 +33,10 @@ import (
 //
 //   - {type: xdr, value: "AAAAAQ=="}
 //
-// To add a type, extend the switch in ToScVal and add a case to the table test
-// in args_test.go. Nothing else needs to change.
+// To add a type, write an encoder and register it in argTypeRegistry, then add
+// a case to the table test in args_test.go — a test asserts every registered
+// type has one. SupportedArgTypes, and therefore every "supported: ..."
+// error message, is derived from the registry, so nothing else needs to change.
 type Arg struct {
 	Type  string `yaml:"type" json:"type"`
 	Value Value  `yaml:"value" json:"value"`
@@ -64,10 +66,66 @@ const (
 )
 
 // SupportedArgTypes lists every recognised Arg type, for error messages and docs.
-var SupportedArgTypes = []string{
-	ArgBool, ArgVoid, ArgU32, ArgI32, ArgU64, ArgI64, ArgU128, ArgI128,
-	ArgU256, ArgI256, ArgTimepoint, ArgDuration,
-	ArgString, ArgSymbol, ArgBytes, ArgAddress, ArgVec, ArgMap, ArgXDR,
+//
+// It is derived from argTypeRegistry, so the list cannot fall behind the
+// encoders that define it — the drift the old hand-maintained literal allowed,
+// where a type could be encoded but absent from the message, or listed but
+// never encoded.
+var SupportedArgTypes []string
+
+// argEncoder converts one Arg to its XDR representation.
+type argEncoder func(Arg) (xdr.ScVal, error)
+
+// argTypeEntry pairs a normalised Arg type name with the encoder for it.
+type argTypeEntry struct {
+	name   string
+	encode argEncoder
+}
+
+// argTypeRegistry is the ordered list of every recognised Arg type: ToScVal
+// looks a normalised name up here, and SupportedArgTypes is derived from the
+// same entries, so registering an encoder is what makes a type supported.
+// The order is the order the types appear in "supported: ..." messages.
+//
+// vec and map recurse through Arg.ToScVal rather than calling encoders
+// directly, so nested values take the same registry lookup — and the same
+// per-index error wrapping — as top-level ones.
+var argTypeRegistry []argTypeEntry
+
+// init fills the registry rather than using initialization expressions for the
+// two vars above, because the pieces depend on each other: the registry holds
+// the encoder functions, vec and map recurse through ToScVal, and ToScVal
+// reads both the registry and SupportedArgTypes. Written as initialization
+// expressions that is a cycle the compiler rejects; init runs once after all
+// package variables are set, so the registration order is still deterministic
+// and the cycle cannot form.
+func init() {
+	for _, entry := range []argTypeEntry{
+		{ArgBool, encodeBool},
+		{ArgVoid, encodeVoid},
+		{ArgU32, encodeU32},
+		{ArgI32, encodeI32},
+		{ArgU64, encodeU64},
+		{ArgI64, encodeI64},
+		{ArgU128, encodeU128},
+		{ArgI128, encodeI128},
+		{ArgU256, encodeU256},
+		{ArgI256, encodeI256},
+		{ArgTimepoint, encodeTimepoint},
+		{ArgDuration, encodeDuration},
+		{ArgString, encodeString},
+		{ArgSymbol, encodeSymbol},
+		{ArgBytes, encodeBytes},
+		{ArgAddress, encodeAddress},
+		{ArgVec, encodeVec},
+		{ArgMap, encodeMap},
+		{ArgXDR, encodeXDR},
+	} {
+		argTypeRegistry = append(argTypeRegistry, entry)
+	}
+	for _, entry := range argTypeRegistry {
+		SupportedArgTypes = append(SupportedArgTypes, entry.name)
+	}
 }
 
 // MapEntry is one key/value pair of a `map` argument.
@@ -79,194 +137,227 @@ type MapEntry struct {
 // ToScVal converts the argument to its XDR representation.
 //
 // Errors describe the offending value and the expected shape, since a config
-// author reading them has no visibility into Soroban's type system.
+// author reading them has no visibility into Soroban's type system. An unknown
+// type is pointed at the "xdr" escape hatch, so a type outside the registry is
+// never a hard block.
 func (a Arg) ToScVal() (xdr.ScVal, error) {
-	switch strings.ToLower(strings.TrimSpace(a.Type)) {
-	case "":
+	name := strings.ToLower(strings.TrimSpace(a.Type))
+	if name == "" {
 		return xdr.ScVal{}, fmt.Errorf("missing type (supported: %s)", strings.Join(SupportedArgTypes, ", "))
-
-	case ArgVoid:
-		return xdr.ScVal{Type: xdr.ScValTypeScvVoid}, nil
-
-	case ArgBool:
-		b, err := a.Value.asBool()
-		if err != nil {
-			return xdr.ScVal{}, err
-		}
-		return xdr.ScVal{Type: xdr.ScValTypeScvBool, B: &b}, nil
-
-	case ArgU32:
-		n, err := a.Value.asUint(32)
-		if err != nil {
-			return xdr.ScVal{}, err
-		}
-		v := xdr.Uint32(n)
-		return xdr.ScVal{Type: xdr.ScValTypeScvU32, U32: &v}, nil
-
-	case ArgI32:
-		n, err := a.Value.asInt(32)
-		if err != nil {
-			return xdr.ScVal{}, err
-		}
-		v := xdr.Int32(n)
-		return xdr.ScVal{Type: xdr.ScValTypeScvI32, I32: &v}, nil
-
-	case ArgU64:
-		n, err := a.Value.asUint(64)
-		if err != nil {
-			return xdr.ScVal{}, err
-		}
-		v := xdr.Uint64(n)
-		return xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &v}, nil
-
-	case ArgI64:
-		n, err := a.Value.asInt(64)
-		if err != nil {
-			return xdr.ScVal{}, err
-		}
-		v := xdr.Int64(n)
-		return xdr.ScVal{Type: xdr.ScValTypeScvI64, I64: &v}, nil
-
-	case ArgU128:
-		parts, err := a.Value.asUint128()
-		if err != nil {
-			return xdr.ScVal{}, err
-		}
-		return xdr.ScVal{Type: xdr.ScValTypeScvU128, U128: &parts}, nil
-
-	case ArgI128:
-		parts, err := a.Value.asInt128()
-		if err != nil {
-			return xdr.ScVal{}, err
-		}
-		return xdr.ScVal{Type: xdr.ScValTypeScvI128, I128: &parts}, nil
-
-	case ArgU256:
-		parts, err := a.Value.asUint256()
-		if err != nil {
-			return xdr.ScVal{}, err
-		}
-		return xdr.ScVal{Type: xdr.ScValTypeScvU256, U256: &parts}, nil
-
-	case ArgI256:
-		parts, err := a.Value.asInt256()
-		if err != nil {
-			return xdr.ScVal{}, err
-		}
-		return xdr.ScVal{Type: xdr.ScValTypeScvI256, I256: &parts}, nil
-
-	case ArgTimepoint:
-		n, err := a.Value.asUint(64)
-		if err != nil {
-			return xdr.ScVal{}, err
-		}
-		tp := xdr.TimePoint(n)
-		return xdr.ScVal{Type: xdr.ScValTypeScvTimepoint, Timepoint: &tp}, nil
-
-	case ArgDuration:
-		n, err := a.Value.asUint(64)
-		if err != nil {
-			return xdr.ScVal{}, err
-		}
-		dur := xdr.Duration(n)
-		return xdr.ScVal{Type: xdr.ScValTypeScvDuration, Duration: &dur}, nil
-
-	case ArgString:
-		s, err := a.Value.asString()
-		if err != nil {
-			return xdr.ScVal{}, err
-		}
-		v := xdr.ScString(s)
-		return xdr.ScVal{Type: xdr.ScValTypeScvString, Str: &v}, nil
-
-	case ArgSymbol:
-		s, err := a.Value.asString()
-		if err != nil {
-			return xdr.ScVal{}, err
-		}
-		if err := validateSymbol(s); err != nil {
-			return xdr.ScVal{}, err
-		}
-		v := xdr.ScSymbol(s)
-		return xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &v}, nil
-
-	case ArgBytes:
-		s, err := a.Value.asString()
-		if err != nil {
-			return xdr.ScVal{}, fmt.Errorf("bytes: expected a hex string: %w", err)
-		}
-		raw, err := hex.DecodeString(strings.TrimPrefix(s, "0x"))
-		if err != nil {
-			return xdr.ScVal{}, fmt.Errorf("bytes: %q is not valid hex: %w", s, err)
-		}
-		v := xdr.ScBytes(raw)
-		return xdr.ScVal{Type: xdr.ScValTypeScvBytes, Bytes: &v}, nil
-
-	case ArgAddress:
-		s, err := a.Value.asString()
-		if err != nil {
-			return xdr.ScVal{}, err
-		}
-		addr, err := ParseAddress(s)
-		if err != nil {
-			return xdr.ScVal{}, err
-		}
-		return xdr.ScVal{Type: xdr.ScValTypeScvAddress, Address: &addr}, nil
-
-	case ArgVec:
-		var items []Arg
-		if err := a.Value.decode(&items); err != nil {
-			return xdr.ScVal{}, fmt.Errorf("vec: expected a list of args: %w", err)
-		}
-		vec := make(xdr.ScVec, 0, len(items))
-		for i, item := range items {
-			val, err := item.ToScVal()
-			if err != nil {
-				return xdr.ScVal{}, fmt.Errorf("vec[%d]: %w", i, err)
-			}
-			vec = append(vec, val)
-		}
-		// ScVal.Vec is a **ScVec: the outer pointer marks union presence, the
-		// inner one carries XDR's optional-vector encoding.
-		ptr := &vec
-		return xdr.ScVal{Type: xdr.ScValTypeScvVec, Vec: &ptr}, nil
-
-	case ArgMap:
-		var entries []MapEntry
-		if err := a.Value.decode(&entries); err != nil {
-			return xdr.ScVal{}, fmt.Errorf("map: expected a list of {key, value} pairs: %w", err)
-		}
-		scMap := make(xdr.ScMap, 0, len(entries))
-		for i, entry := range entries {
-			key, err := entry.Key.ToScVal()
-			if err != nil {
-				return xdr.ScVal{}, fmt.Errorf("map[%d].key: %w", i, err)
-			}
-			val, err := entry.Value.ToScVal()
-			if err != nil {
-				return xdr.ScVal{}, fmt.Errorf("map[%d].value: %w", i, err)
-			}
-			scMap = append(scMap, xdr.ScMapEntry{Key: key, Val: val})
-		}
-		ptr := &scMap
-		return xdr.ScVal{Type: xdr.ScValTypeScvMap, Map: &ptr}, nil
-
-	case ArgXDR:
-		s, err := a.Value.asString()
-		if err != nil {
-			return xdr.ScVal{}, fmt.Errorf("xdr: expected a base64 string: %w", err)
-		}
-		var val xdr.ScVal
-		if err := xdr.SafeUnmarshalBase64(s, &val); err != nil {
-			return xdr.ScVal{}, fmt.Errorf("xdr: %q is not a valid base64 ScVal: %w", s, err)
-		}
-		return val, nil
-
-	default:
-		return xdr.ScVal{}, fmt.Errorf(
-			"unsupported type %q (supported: %s; use type: xdr with a base64 ScVal for anything else)",
-			a.Type, strings.Join(SupportedArgTypes, ", "))
 	}
+	for _, entry := range argTypeRegistry {
+		if entry.name == name {
+			return entry.encode(a)
+		}
+	}
+	return xdr.ScVal{}, fmt.Errorf(
+		"unsupported type %q (supported: %s; use type: xdr with a base64 ScVal for anything else)",
+		a.Type, strings.Join(SupportedArgTypes, ", "))
+}
+
+// encodeVoid is the encoder for "void": the unit value Soroban functions
+// return when they return nothing. It carries no payload.
+func encodeVoid(Arg) (xdr.ScVal, error) {
+	return xdr.ScVal{Type: xdr.ScValTypeScvVoid}, nil
+}
+
+func encodeBool(a Arg) (xdr.ScVal, error) {
+	b, err := a.Value.asBool()
+	if err != nil {
+		return xdr.ScVal{}, err
+	}
+	return xdr.ScVal{Type: xdr.ScValTypeScvBool, B: &b}, nil
+}
+
+func encodeU32(a Arg) (xdr.ScVal, error) {
+	n, err := a.Value.asUint(32)
+	if err != nil {
+		return xdr.ScVal{}, err
+	}
+	v := xdr.Uint32(n)
+	return xdr.ScVal{Type: xdr.ScValTypeScvU32, U32: &v}, nil
+}
+
+func encodeI32(a Arg) (xdr.ScVal, error) {
+	n, err := a.Value.asInt(32)
+	if err != nil {
+		return xdr.ScVal{}, err
+	}
+	v := xdr.Int32(n)
+	return xdr.ScVal{Type: xdr.ScValTypeScvI32, I32: &v}, nil
+}
+
+func encodeU64(a Arg) (xdr.ScVal, error) {
+	n, err := a.Value.asUint(64)
+	if err != nil {
+		return xdr.ScVal{}, err
+	}
+	v := xdr.Uint64(n)
+	return xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &v}, nil
+}
+
+func encodeI64(a Arg) (xdr.ScVal, error) {
+	n, err := a.Value.asInt(64)
+	if err != nil {
+		return xdr.ScVal{}, err
+	}
+	v := xdr.Int64(n)
+	return xdr.ScVal{Type: xdr.ScValTypeScvI64, I64: &v}, nil
+}
+
+func encodeU128(a Arg) (xdr.ScVal, error) {
+	parts, err := a.Value.asUint128()
+	if err != nil {
+		return xdr.ScVal{}, err
+	}
+	return xdr.ScVal{Type: xdr.ScValTypeScvU128, U128: &parts}, nil
+}
+
+func encodeI128(a Arg) (xdr.ScVal, error) {
+	parts, err := a.Value.asInt128()
+	if err != nil {
+		return xdr.ScVal{}, err
+	}
+	return xdr.ScVal{Type: xdr.ScValTypeScvI128, I128: &parts}, nil
+}
+
+func encodeU256(a Arg) (xdr.ScVal, error) {
+	parts, err := a.Value.asUint256()
+	if err != nil {
+		return xdr.ScVal{}, err
+	}
+	return xdr.ScVal{Type: xdr.ScValTypeScvU256, U256: &parts}, nil
+}
+
+func encodeI256(a Arg) (xdr.ScVal, error) {
+	parts, err := a.Value.asInt256()
+	if err != nil {
+		return xdr.ScVal{}, err
+	}
+	return xdr.ScVal{Type: xdr.ScValTypeScvI256, I256: &parts}, nil
+}
+
+func encodeTimepoint(a Arg) (xdr.ScVal, error) {
+	n, err := a.Value.asUint(64)
+	if err != nil {
+		return xdr.ScVal{}, err
+	}
+	tp := xdr.TimePoint(n)
+	return xdr.ScVal{Type: xdr.ScValTypeScvTimepoint, Timepoint: &tp}, nil
+}
+
+func encodeDuration(a Arg) (xdr.ScVal, error) {
+	n, err := a.Value.asUint(64)
+	if err != nil {
+		return xdr.ScVal{}, err
+	}
+	dur := xdr.Duration(n)
+	return xdr.ScVal{Type: xdr.ScValTypeScvDuration, Duration: &dur}, nil
+}
+
+func encodeString(a Arg) (xdr.ScVal, error) {
+	s, err := a.Value.asString()
+	if err != nil {
+		return xdr.ScVal{}, err
+	}
+	v := xdr.ScString(s)
+	return xdr.ScVal{Type: xdr.ScValTypeScvString, Str: &v}, nil
+}
+
+func encodeSymbol(a Arg) (xdr.ScVal, error) {
+	s, err := a.Value.asString()
+	if err != nil {
+		return xdr.ScVal{}, err
+	}
+	if err := validateSymbol(s); err != nil {
+		return xdr.ScVal{}, err
+	}
+	v := xdr.ScSymbol(s)
+	return xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &v}, nil
+}
+
+func encodeBytes(a Arg) (xdr.ScVal, error) {
+	s, err := a.Value.asString()
+	if err != nil {
+		return xdr.ScVal{}, fmt.Errorf("bytes: expected a hex string: %w", err)
+	}
+	raw, err := hex.DecodeString(strings.TrimPrefix(s, "0x"))
+	if err != nil {
+		return xdr.ScVal{}, fmt.Errorf("bytes: %q is not valid hex: %w", s, err)
+	}
+	v := xdr.ScBytes(raw)
+	return xdr.ScVal{Type: xdr.ScValTypeScvBytes, Bytes: &v}, nil
+}
+
+func encodeAddress(a Arg) (xdr.ScVal, error) {
+	s, err := a.Value.asString()
+	if err != nil {
+		return xdr.ScVal{}, err
+	}
+	addr, err := ParseAddress(s)
+	if err != nil {
+		return xdr.ScVal{}, err
+	}
+	return xdr.ScVal{Type: xdr.ScValTypeScvAddress, Address: &addr}, nil
+}
+
+// encodeVec encodes each item through Arg.ToScVal, so a nested value is
+// looked up in the same registry as a top-level one and failures carry the
+// index they occurred at.
+func encodeVec(a Arg) (xdr.ScVal, error) {
+	var items []Arg
+	if err := a.Value.decode(&items); err != nil {
+		return xdr.ScVal{}, fmt.Errorf("vec: expected a list of args: %w", err)
+	}
+	vec := make(xdr.ScVec, 0, len(items))
+	for i, item := range items {
+		val, err := item.ToScVal()
+		if err != nil {
+			return xdr.ScVal{}, fmt.Errorf("vec[%d]: %w", i, err)
+		}
+		vec = append(vec, val)
+	}
+	// ScVal.Vec is a **ScVec: the outer pointer marks union presence, the
+	// inner one carries XDR's optional-vector encoding.
+	ptr := &vec
+	return xdr.ScVal{Type: xdr.ScValTypeScvVec, Vec: &ptr}, nil
+}
+
+// encodeMap encodes keys and values through Arg.ToScVal for the same reason
+// encodeVec does: one registry, one set of error messages, at any depth.
+func encodeMap(a Arg) (xdr.ScVal, error) {
+	var entries []MapEntry
+	if err := a.Value.decode(&entries); err != nil {
+		return xdr.ScVal{}, fmt.Errorf("map: expected a list of {key, value} pairs: %w", err)
+	}
+	scMap := make(xdr.ScMap, 0, len(entries))
+	for i, entry := range entries {
+		key, err := entry.Key.ToScVal()
+		if err != nil {
+			return xdr.ScVal{}, fmt.Errorf("map[%d].key: %w", i, err)
+		}
+		val, err := entry.Value.ToScVal()
+		if err != nil {
+			return xdr.ScVal{}, fmt.Errorf("map[%d].value: %w", i, err)
+		}
+		scMap = append(scMap, xdr.ScMapEntry{Key: key, Val: val})
+	}
+	ptr := &scMap
+	return xdr.ScVal{Type: xdr.ScValTypeScvMap, Map: &ptr}, nil
+}
+
+// encodeXDR is the escape hatch: a pre-encoded base64 ScVal is accepted
+// verbatim, so a type absent from the registry is never a hard block.
+func encodeXDR(a Arg) (xdr.ScVal, error) {
+	s, err := a.Value.asString()
+	if err != nil {
+		return xdr.ScVal{}, fmt.Errorf("xdr: expected a base64 string: %w", err)
+	}
+	var val xdr.ScVal
+	if err := xdr.SafeUnmarshalBase64(s, &val); err != nil {
+		return xdr.ScVal{}, fmt.Errorf("xdr: %q is not a valid base64 ScVal: %w", s, err)
+	}
+	return val, nil
 }
 
 // ArgsToScVals converts a list of arguments, reporting which one failed.

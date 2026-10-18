@@ -177,3 +177,62 @@ func testContractID(t *testing.T) string {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+func TestParseAsset(t *testing.T) {
+	native, err := ParseAsset("native")
+	require.NoError(t, err)
+	assert.Equal(t, xdr.AssetTypeAssetTypeNative, native.Type)
+
+	issuer := keypair.MustRandom().Address()
+	credit, err := ParseAsset("USDC:" + issuer)
+	require.NoError(t, err)
+	assert.Equal(t, xdr.AssetTypeAssetTypeCreditAlphanum4, credit.Type)
+
+	_, err = ParseAsset("invalid:asset:extra")
+	assert.Error(t, err)
+}
+
+func TestContractIDFromAsset(t *testing.T) {
+	native, err := ParseAsset("native")
+	require.NoError(t, err)
+
+	passphrase := "Test SDF Network ; September 2015"
+	id, err := ContractIDFromAsset(native, passphrase)
+	require.NoError(t, err)
+	assert.True(t, len(id) > 0)
+	assert.Equal(t, byte('C'), id[0])
+
+	// Same asset and passphrase yields identical deterministic contract ID.
+	id2, err := ContractIDFromAsset(native, passphrase)
+	require.NoError(t, err)
+	assert.Equal(t, id, id2)
+
+	// Different network passphrase yields different contract ID.
+	otherPassphrase := "Public Global Stellar Network ; September 2015"
+	idOther, err := ContractIDFromAsset(native, otherPassphrase)
+	require.NoError(t, err)
+	assert.NotEqual(t, id, idOther)
+}
+
+func TestCreateSacOp(t *testing.T) {
+	native, err := ParseAsset("native")
+	require.NoError(t, err)
+
+	source := keypair.MustRandom().Address()
+	op := CreateSacOp(native, source)
+
+	assert.Equal(t, xdr.HostFunctionTypeHostFunctionTypeCreateContract, op.HostFunction.Type)
+	require.NotNil(t, op.HostFunction.CreateContract)
+
+	create := op.HostFunction.CreateContract
+	assert.Equal(t, xdr.ContractIdPreimageTypeContractIdPreimageFromAsset, create.ContractIdPreimage.Type)
+	require.NotNil(t, create.ContractIdPreimage.FromAsset)
+	assert.Equal(t, native, *create.ContractIdPreimage.FromAsset)
+
+	assert.Equal(t, xdr.ContractExecutableTypeContractExecutableStellarAsset, create.Executable.Type)
+	assert.Equal(t, source, op.SourceAccount)
+
+	// Operation must survive XDR marshaling.
+	_, err = op.BuildXDR()
+	require.NoError(t, err)
+}

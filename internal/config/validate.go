@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+
+	"github.com/stellar/go-stellar-sdk/txnbuild"
 )
 
 // SupportedVersion is the only soroforge.yaml schema version understood today.
@@ -123,33 +125,52 @@ func validateContract(alias string, c Contract, networks map[string]Network) []s
 		return []string{"contracts: contract aliases must not be empty"}
 	}
 
-	if strings.TrimSpace(c.Wasm) == "" {
+	hasWasm := strings.TrimSpace(c.Wasm) != ""
+	hasAsset := strings.TrimSpace(c.Asset) != ""
+
+	switch {
+	case !hasWasm && !hasAsset:
 		problems = append(problems, prefix+".wasm: must be set")
-	}
-
-	for i, arg := range c.ConstructorArgs {
-		if _, err := arg.ToScVal(); err != nil {
-			problems = append(problems, fmt.Sprintf("%s.constructor_args[%d]: %v", prefix, i, err))
+	case hasWasm && hasAsset:
+		problems = append(problems, prefix+": wasm and asset are mutually exclusive")
+	case hasAsset:
+		if err := validateAsset(c.Asset); err != nil {
+			problems = append(problems, fmt.Sprintf("%s.asset: %v", prefix, err))
 		}
-	}
-
-	if strings.TrimSpace(c.InitFunc) != "" && len(c.ConstructorArgs) > 0 {
-		problems = append(problems, fmt.Sprintf("%s: cannot configure both constructor_args and init_fn", prefix))
-	}
-
-	for i, arg := range c.InitArgs {
-		if _, err := arg.ToScVal(); err != nil {
-			problems = append(problems, fmt.Sprintf("%s.init_args[%d]: %v", prefix, i, err))
+		if len(c.ConstructorArgs) > 0 {
+			problems = append(problems, prefix+": Stellar Asset Contracts do not take constructor args")
 		}
-	}
+		if c.Salt != "" {
+			problems = append(problems, prefix+": Stellar Asset Contracts derive their ID from the asset; salt cannot be used")
+		}
+		if strings.TrimSpace(c.InitFunc) != "" || len(c.InitArgs) > 0 {
+			problems = append(problems, prefix+": Stellar Asset Contracts are not initialized; init_fn and init_args cannot be used")
+		}
+	case hasWasm:
+		for i, arg := range c.ConstructorArgs {
+			if _, err := arg.ToScVal(); err != nil {
+				problems = append(problems, fmt.Sprintf("%s.constructor_args[%d]: %v", prefix, i, err))
+			}
+		}
 
-	if len(c.InitArgs) > 0 && strings.TrimSpace(c.InitFunc) == "" {
-		problems = append(problems, prefix+".init_args: init_fn must be set when init_args are configured")
-	}
+		if strings.TrimSpace(c.InitFunc) != "" && len(c.ConstructorArgs) > 0 {
+			problems = append(problems, fmt.Sprintf("%s: cannot configure both constructor_args and init_fn", prefix))
+		}
 
-	if c.Salt != "" {
-		if _, err := ParseSalt(c.Salt); err != nil {
-			problems = append(problems, fmt.Sprintf("%s.salt: %v", prefix, err))
+		for i, arg := range c.InitArgs {
+			if _, err := arg.ToScVal(); err != nil {
+				problems = append(problems, fmt.Sprintf("%s.init_args[%d]: %v", prefix, i, err))
+			}
+		}
+
+		if len(c.InitArgs) > 0 && strings.TrimSpace(c.InitFunc) == "" {
+			problems = append(problems, prefix+".init_args: init_fn must be set when init_args are configured")
+		}
+
+		if c.Salt != "" {
+			if _, err := ParseSalt(c.Salt); err != nil {
+				problems = append(problems, fmt.Sprintf("%s.salt: %v", prefix, err))
+			}
 		}
 	}
 
@@ -185,6 +206,15 @@ func validateContractOverride(prefix, network string, o ContractOverride, networ
 	}
 
 	return problems
+}
+
+func validateAsset(s string) error {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return errors.New("must not be empty")
+	}
+	_, err := txnbuild.ParseAssetString(trimmed)
+	return err
 }
 
 func sortedKeys[V any](m map[string]V) []string {

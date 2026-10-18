@@ -40,6 +40,11 @@ cover: ## Run tests and open a coverage report
 	go test -coverprofile=coverage.out ./...
 	go tool cover -html=coverage.out
 
+.PHONY: cover-report
+cover-report: ## Print per-package coverage as CI reports it (excludes test helpers)
+	go test -coverprofile=coverage.out ./...
+	@scripts/coverage.sh coverage.out
+
 .PHONY: test-integration
 test-integration: ## Run tests including the Postgres integration suite
 	TEST_DATABASE_URL="$(DATABASE_URL)" go test ./... -count=1
@@ -47,6 +52,10 @@ test-integration: ## Run tests including the Postgres integration suite
 .PHONY: test-live
 test-live: ## Run the read-only smoke tests against live Stellar testnet
 	SOROFORGE_LIVE=1 go test ./internal/stellar/ -run Live -v -count=1
+
+.PHONY: test-e2e
+test-e2e: ## Run the deploy/upgrade end-to-end test against a local quickstart network (see internal/e2e/README.md)
+	go test -tags e2e ./internal/e2e/ -count=1 -v
 
 .PHONY: fmt
 fmt: ## Format the code
