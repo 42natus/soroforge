@@ -1,0 +1,24 @@
+[package]
+name = "upgradeable"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+# Builds the second bytecode version: same interface, version() returns 2.
+v2 = []
+
+[dependencies]
+soroban-sdk = "25"
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+panic = "abort"
+codegen-units = 1
+lto = true

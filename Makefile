@@ -48,6 +48,10 @@ test-integration: ## Run tests including the Postgres integration suite
 test-live: ## Run the read-only smoke tests against live Stellar testnet
 	SOROFORGE_LIVE=1 go test ./internal/stellar/ -run Live -v -count=1
 
+.PHONY: test-e2e
+test-e2e: ## Run the deploy/upgrade end-to-end test against a local quickstart network (see internal/e2e/README.md)
+	go test -tags e2e ./internal/e2e/ -count=1 -v
+
 .PHONY: fmt
 fmt: ## Format the code
 	gofmt -w .

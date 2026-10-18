@@ -128,6 +128,47 @@ jobs:
       - name: Lint OpenAPI document
         run: npx --yes @redocly/cli lint --extends minimal internal/api/openapi.json
 
+  # Deploys and upgrades a real contract against a standalone Stellar network
+  # (stellar/quickstart in local mode, with RPC and Friendbot), which no mock
+  # can prove. Behind the e2e build tag so `make check` stays offline. The image
+  # tag is pinned: see internal/e2e/README.md before changing it.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          check-latest: true
+
+      - name: Start local Stellar network
+        run: |
+          docker run -d --name stellar -p 8000:8000 stellar/quickstart:v678-b1525.1-latest --local --enable rpc
+          # The container is up long before the node is. Wait for RPC to
+          # report healthy; the test itself retries Friendbot.
+          for i in $(seq 1 90); do
+            if curl -sf -X POST -H 'Content-Type: application/json'                  -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}'                  http://localhost:8000/rpc | grep -q healthy; then
+              echo "RPC healthy after $((i * 5))s"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::local network did not become healthy"
+          docker logs stellar | tail -50
+          exit 1
+
+      - name: End-to-end test
+        run: go test -tags e2e ./internal/e2e/ -count=1 -v
+
+      - name: Network logs on failure
+        if: failure()
+        run: docker logs stellar | tail -100
+
   docker:
     runs-on: ubuntu-latest
     permissions:
