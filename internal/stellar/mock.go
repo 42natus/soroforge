@@ -33,6 +33,20 @@ type MockClient struct {
 	// LedgerSeq is returned by LatestLedger.
 	LedgerSeq uint32
 
+	// LatestLedgerErr, if set, makes LatestLedger fail — the shape a network
+	// health check uses to exercise an unreachable endpoint.
+	LatestLedgerErr error
+
+	// ReportPassphrase is returned by ReportNetworkPassphrase. Empty means
+	// reuse Passphrase, which models an endpoint serving its configured
+	// network; set it to a different value to model a URL pointing at the
+	// wrong network.
+	ReportPassphrase string
+
+	// ReportPassphraseErr, if set, makes ReportNetworkPassphrase fail,
+	// modelling an endpoint without getNetwork support.
+	ReportPassphraseErr error
+
 	// SimulateFunc overrides simulation entirely. When nil, Simulate returns
 	// SimulateResponse.
 	SimulateFunc func(ctx context.Context, txXDR string) (SimulateResult, error)
@@ -68,6 +82,7 @@ type MockClient struct {
 }
 
 var _ Client = (*MockClient)(nil)
+var _ NetworkReporter = (*MockClient)(nil)
 
 // NewMockClient returns a client with workable defaults: testnet passphrase, a
 // successful confirmation, and no ledger entries.
@@ -150,7 +165,24 @@ func (m *MockClient) LedgerEntries(_ context.Context, keysB64 []string) ([]Ledge
 
 // LatestLedger implements Client.
 func (m *MockClient) LatestLedger(_ context.Context) (uint32, error) {
+	if m.LatestLedgerErr != nil {
+		return 0, m.LatestLedgerErr
+	}
 	return m.LedgerSeq, nil
+}
+
+// ReportNetworkPassphrase implements NetworkReporter. It returns
+// ReportPassphrase when set, otherwise the configured Passphrase, so that a
+// default mock reports a matching network; ReportPassphraseErr stands in for
+// an endpoint whose getNetwork fails or is unsupported.
+func (m *MockClient) ReportNetworkPassphrase(_ context.Context) (string, error) {
+	if m.ReportPassphraseErr != nil {
+		return "", m.ReportPassphraseErr
+	}
+	if m.ReportPassphrase != "" {
+		return m.ReportPassphrase, nil
+	}
+	return m.Passphrase, nil
 }
 
 // SendCount reports how many envelopes were submitted. Dry-run tests assert

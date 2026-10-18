@@ -23,6 +23,7 @@ import (
 //   PollTransaction(ctx, txHash string)                           (protocol.GetTransactionResponse, error)
 //   GetLedgerEntries(ctx, protocol.GetLedgerEntriesRequest)       (protocol.GetLedgerEntriesResponse, error)
 //   GetLatestLedger(ctx)                                          (protocol.GetLatestLedgerResponse, error)
+//   GetNetwork(ctx)                                               (protocol.GetNetworkResponse, error)
 //   LoadAccount(ctx, address string)                              (txnbuild.Account, error)
 
 // DefaultHTTPTimeout bounds a single RPC call. Transaction confirmation is not
@@ -39,6 +40,7 @@ type RPCClient struct {
 // Compile-time check that the live implementation satisfies the interface every
 // other package depends on.
 var _ Client = (*RPCClient)(nil)
+var _ NetworkReporter = (*RPCClient)(nil)
 
 // RPCOptions configures a live client.
 type RPCOptions struct {
@@ -208,4 +210,15 @@ func (c *RPCClient) LatestLedger(ctx context.Context) (uint32, error) {
 		return 0, fmt.Errorf("getLatestLedger: %w", err)
 	}
 	return resp.Sequence, nil
+}
+
+// ReportNetworkPassphrase implements NetworkReporter. It asks the endpoint
+// which network it serves rather than echoing the configured value, so that
+// `soroforge networks` can compare the two.
+func (c *RPCClient) ReportNetworkPassphrase(ctx context.Context) (string, error) {
+	resp, err := c.rpc.GetNetwork(ctx)
+	if err != nil {
+		return "", fmt.Errorf("getNetwork: %w", err)
+	}
+	return resp.Passphrase, nil
 }

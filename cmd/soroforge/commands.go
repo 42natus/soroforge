@@ -15,6 +15,7 @@ import (
 	"github.com/soroworks/soroforge/internal/api"
 	"github.com/soroworks/soroforge/internal/config"
 	"github.com/soroworks/soroforge/internal/deploy"
+	"github.com/soroworks/soroforge/internal/netcheck"
 	"github.com/soroworks/soroforge/internal/readiness"
 	"github.com/soroworks/soroforge/internal/store"
 	"github.com/spf13/cobra"
@@ -44,7 +45,7 @@ them. A dry run prints the contract address a real deploy would produce and the
 assembled envelopes, and writes nothing to the database.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// A dry run writes nothing, so it does not need Postgres — that
+			// A dry run writes nothing, so it does not need a database — that
 			// makes it usable as a config check in a fresh checkout.
 			a, err := newApp(cmd.Context(), appOptions{
 				requireSigner: true,
@@ -73,6 +74,7 @@ assembled envelopes, and writes nothing to the database.`,
 		"assemble and simulate without submitting or recording anything")
 	cmd.Flags().StringVar(&notes, "notes", "",
 		"free-form note recorded with this deployment (e.g. a ticket or release tag)")
+	attachAliasCompletion(cmd)
 	cmd.Flags().StringVar(&gitCommit, "git-commit", "", "override the detected source commit")
 
 	return cmd
@@ -126,6 +128,7 @@ upgrade applied outside SoroForge is still reported accurately.`,
 		"assemble and simulate without submitting or recording anything")
 	cmd.Flags().StringVar(&notes, "notes", "",
 		"free-form note recorded with this upgrade")
+	attachAliasCompletion(cmd)
 	cmd.Flags().StringVar(&gitCommit, "git-commit", "", "override the detected source commit")
 	cmd.Flags().StringVar(&wasmHash, "wasm-hash", "", "upgrade to an existing on-chain WASM hash instead of local file")
 
@@ -157,7 +160,7 @@ Use --dry-run to assemble and simulate without submitting or recording
 anything.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// A dry run writes nothing, so it does not need Postgres.
+			// A dry run writes nothing, so it does not need a database.
 			a, err := newApp(cmd.Context(), appOptions{
 				requireSigner: true,
 				storeOptional: dryRun,
@@ -184,6 +187,7 @@ anything.`,
 		"assemble and simulate without submitting or recording anything")
 	cmd.Flags().StringVar(&notes, "notes", "",
 		"free-form note recorded with this upload (e.g. a ticket or release tag)")
+	attachAliasCompletion(cmd)
 
 	return cmd
 }
@@ -274,13 +278,18 @@ Pass --network to restrict the list to one network.`,
 }
 
 func newHistoryCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "history <alias>",
-		Short: "Show a contract's deploy and upgrade history",
+		Short: "Show, export, or import a contract's deploy and upgrade history",
 		Long: `Show every recorded change to one contract on one network, newest first.
 
 Each entry records the WASM hash, who deployed it, the transaction, and the
-ledger it landed in.`,
+ledger it landed in.
+
+The subcommands move the whole history between databases:
+
+  history export  write every contract and deployment as a versioned JSON document
+  history import  load such a document into an empty (or, with --merge, existing) database`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := newApp(cmd.Context(), appOptions{})
@@ -302,6 +311,161 @@ ledger it landed in.`,
 			return printHistory(alias, network, deployments)
 		},
 	}
+
+	attachAliasCompletion(cmd)
+	cmd.AddCommand(newHistoryExportCmd(), newHistoryImportCmd())
+	return cmd
+}
+
+func newHistoryExportCmd() *cobra.Command {
+	var outPath string
+
+	cmd := &cobra.Command{
+		Use:   "export",
+		Short: "Write the full deployment history as versioned JSON",
+		Long: `Export every tracked contract and every recorded deploy, upgrade, and
+upload to a portable JSON document.
+
+The file is version 1 of a documented format (see internal/store/history.go
+and the README): it carries the original ids and timestamps, so an import
+reproduces the history exactly rather than re-stamping it as "just imported".
+Deployments whose alias has since left soroforge.yaml are still included —
+the history outlives the config.
+
+With --out the document is written to that file; otherwise it goes to stdout,
+where ` + "`soroforge history export > history.json`" + ` does the rest.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			a, err := newApp(cmd.Context(), appOptions{})
+			if err != nil {
+				return err
+			}
+			defer a.Close()
+
+			snap, err := store.BuildSnapshot(cmd.Context(), a.store)
+			if err != nil {
+				return err
+			}
+			data, err := snap.Marshal()
+			if err != nil {
+				return err
+			}
+
+			if outPath == "" {
+				if _, err := out().Write(data); err != nil {
+					return err
+				}
+				return nil
+			}
+			// 0644: the file is history data, not a secret — it holds only
+			// public addresses and hashes by construction.
+			if err := os.WriteFile(outPath, data, 0o644); err != nil {
+				return fmt.Errorf("write history file: %w", err)
+			}
+			fmt.Fprintf(out(), "Exported %d contract(s) and %d deployment(s) to %s.\n",
+				len(snap.Contracts), len(snap.Deployments), outPath)
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&outPath, "out", "", "file to write (default: stdout)")
+	return cmd
+}
+
+func newHistoryImportCmd() *cobra.Command {
+	var merge bool
+
+	cmd := &cobra.Command{
+		Use:   "import <file>",
+		Short: "Load a history export into the database",
+		Long: `Import a JSON document written by ` + "`history export`" + `.
+
+Records keep their original ids and timestamps; the importer never re-stamps.
+A database that already holds history is refused unless --merge is given,
+which skips records identical to what is already stored and adds only what is
+missing. Same-id-with-different-content is always an error: when the file and
+the database disagree about an identity, guessing would corrupt one of them.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			raw, err := os.ReadFile(args[0])
+			if err != nil {
+				return fmt.Errorf("read history file: %w", err)
+			}
+			snap, err := store.ParseSnapshot(raw)
+			if err != nil {
+				return err
+			}
+
+			a, err := newApp(cmd.Context(), appOptions{})
+			if err != nil {
+				return err
+			}
+			defer a.Close()
+
+			report, err := store.Import(cmd.Context(), a.store, snap, store.ImportOptions{Merge: merge})
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(out(),
+				"Imported %d contract(s) and %d deployment(s) from %s (%d contract(s), %d deployment(s) already present, skipped).\n",
+				report.ContractsImported, report.DeploymentsImported, args[0],
+				report.ContractsSkipped, report.DeploymentsSkipped)
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVar(&merge, "merge", false,
+		"import into a non-empty database, skipping records that exactly duplicate what is stored")
+	return cmd
+}
+
+func newNetworksCmd() *cobra.Command {
+	var timeout time.Duration
+
+	cmd := &cobra.Command{
+		Use:   "networks",
+		Short: "Check every configured network's RPC endpoint",
+		Long: `Probe each network in soroforge.yaml and report whether it answered,
+how fast, its latest ledger, and whether the passphrase the endpoint reports
+matches the one configured.
+
+A mistyped rpc_url or a provider that moved can point "testnet" at a different
+chain; the failure then surfaces as a rejected signature or a deploy on the
+wrong network. This command checks the mapping up front instead. Endpoints are
+probed concurrently, each under --timeout.
+
+The RPC URL is printed with any userinfo and query-string credentials removed,
+so the report is safe to paste into a ticket or a CI log.
+
+Exit codes:
+  0  every network answered and matched its configuration
+  1  at least one check failed (unreachable endpoint or passphrase mismatch)`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := config.Load(flags.configPath)
+			if err != nil {
+				return err
+			}
+
+			// The same client the deploy service uses, so the probe exercises
+			// precisely the endpoint a deploy would.
+			results := netcheck.Check(cmd.Context(), cfg.Networks,
+				netcheck.ClientFactory(deploy.DefaultClientFactory), timeout)
+
+			if err := printNetworkResults(results); err != nil {
+				return err
+			}
+			if netcheck.AnyFailure(results) {
+				cmd.SilenceUsage = true
+				return errors.New("one or more network checks failed")
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().DurationVar(&timeout, "timeout", netcheck.DefaultTimeout,
+		"timeout for each network probe")
+	return cmd
 }
 
 func newStatusCmd() *cobra.Command {
@@ -374,6 +538,7 @@ The non-zero exit on drift makes this usable as a CI gate.`,
 	}
 
 	cmd.Flags().BoolVar(&all, "all", false, "check every tracked contract on the network")
+	attachAliasCompletion(cmd)
 	return cmd
 }
 

@@ -86,11 +86,12 @@ func LoadEnv() Env {
 	}
 }
 
-// RequireDatabaseURL returns the configured Postgres URL, or an error naming
-// the variable to set.
+// RequireDatabaseURL returns the configured database URL, or an error naming
+// the variable to set. Both backends are accepted: a postgres:// connection
+// string or a sqlite:///path/to/file.db URL.
 func (e Env) RequireDatabaseURL() (string, error) {
 	if e.DatabaseURL == "" {
-		return "", fmt.Errorf("%s is not set; SoroForge needs Postgres to record deployment history", EnvDatabaseURL)
+		return "", fmt.Errorf("%s is not set; SoroForge needs a database (postgres:// or sqlite://) to record deployment history", EnvDatabaseURL)
 	}
 	return e.DatabaseURL, nil
 }
