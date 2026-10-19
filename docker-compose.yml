@@ -5,6 +5,16 @@
 #
 # This is a development convenience, not a production deployment: the
 # credentials are well known and the database is reachable on localhost.
+#
+# The "app" profile adds the API itself, so one command brings up the
+# database, applies migrations, and starts the server:
+#
+#   docker compose --profile app up -d
+#
+# Plain `docker compose up -d` above still means Postgres-only: `migrate` and
+# `serve` exist only under the profile. Secrets (SOROFORGE_API_TOKEN, the
+# deployer key) are passed through from the environment — extend .env with
+# them; nothing secret belongs in this file.
 
 services:
   postgres:
@@ -27,6 +37,80 @@ services:
       timeout: 5s
       retries: 10
       start_period: 10s
+    restart: unless-stopped
+
+  # One-shot migration job: applies pending migrations and exits 0. `serve`
+  # waits for it via service_completed_successfully, so the API never starts
+  # against an out-of-date schema. Same pattern the Helm job-migrate template
+  # uses (deploy/helm/soroforge/templates/job-migrate.yaml).
+  migrate:
+    profiles: ["app"]
+    build: .
+    image: soroforge:compose
+    command: ["migrate", "up"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Inside the compose network the database host is the service name;
+      # this default mirrors .env.example's localhost URL. Override with your
+      # own DATABASE_URL to point elsewhere.
+      DATABASE_URL: ${DATABASE_URL:-postgres://soroforge:soroforge@postgres:5432/soroforge?sslmode=disable}
+    restart: "no"
+
+  # The HTTP API. Started only after `migrate` has completed successfully, and
+  # published to loopback on the host only — the process holds a signing key,
+  # so widening the binding is an explicit operator decision, never a default.
+  serve:
+    profiles: ["app"]
+    image: soroforge:compose
+    command: ["serve"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://soroforge:soroforge@postgres:5432/soroforge?sslmode=disable}
+
+      # Secrets come from the environment, never from this file. The API
+      # refuses to start without a token (see .env.example), so a missing
+      # SOROFORGE_API_TOKEN fails here with compose's own message rather
+      # than crash-looping the container.
+      SOROFORGE_API_TOKEN: ${SOROFORGE_API_TOKEN:?set SOROFORGE_API_TOKEN in the environment or .env}
+      SOROFORGE_API_TOKENS: ${SOROFORGE_API_TOKENS:-}
+      SOROFORGE_LOG_FORMAT: ${SOROFORGE_LOG_FORMAT:-}
+
+      # Deployer key, exactly the .env.example menu: a seed variable, a
+      # keystore file mounted read-only below, or an external signer. Pass
+      # the choice through untouched — which source wins is the binary's
+      # documented rule, not this file's.
+      SOROFORGE_SECRET_KEY: ${SOROFORGE_SECRET_KEY:-}
+      SOROFORGE_KEYSTORE_PATH: ${SOROFORGE_KEYSTORE_PATH:-}
+      SOROFORGE_SIGNER_COMMAND: ${SOROFORGE_SIGNER_COMMAND:-}
+      SOROFORGE_SIGNER_PUBLIC_KEY: ${SOROFORGE_SIGNER_PUBLIC_KEY:-}
+
+      # The image ships only the binary; the project config comes from the
+      # host, mounted read-only below, so serve deploys the contracts you
+      # declared in soroforge.yaml.
+      SOROFORGE_CONFIG: ${SOROFORGE_CONFIG:-/etc/soroforge/soroforge.yaml}
+
+      # Inside the container the server must listen on all interfaces for
+      # the port publish below to reach it; the loopback binding that keeps
+      # it off the network is enforced on the host side, in `ports`.
+      SOROFORGE_API_ADDR: 0.0.0.0:8080
+    ports:
+      # Bound to loopback on the host by default, matching the binary's own
+      # 127.0.0.1:8080 default. Only widen behind your own TLS and auth.
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ${SOROFORGE_CONFIG_HOST_PATH:-./soroforge.yaml}:/etc/soroforge/soroforge.yaml:ro
+      # Keystore file, when that is your key option: mount it at
+      # /run/secrets/deployer_key (set SOROFORGE_KEYSTORE_HOST_PATH to its
+      # path on the host) and point SOROFORGE_KEYSTORE_PATH at that
+      # in-container location. With the host path unset this mounts
+      # /dev/null, which nothing reads unless you asked it to.
+      - ${SOROFORGE_KEYSTORE_HOST_PATH:-/dev/null}:/run/secrets/deployer_key:ro
     restart: unless-stopped
 
 volumes:

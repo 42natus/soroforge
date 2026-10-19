@@ -134,11 +134,24 @@ type DeployResult struct {
 // transaction: first the bytecode is uploaded and becomes addressable by its
 // hash, then a contract instance is created from that hash. The instance is
 // what gets an address; the bytecode is shared by every contract using it.
-func (s *Service) Deploy(ctx context.Context, req DeployRequest) (*DeployResult, error) {
+func (s *Service) Deploy(ctx context.Context, req DeployRequest) (_ *DeployResult, err error) {
 	r, err := s.resolve(req.Network, req.Alias)
 	if err != nil {
 		return nil, err
 	}
+
+	// Every failure past this point records a failed attempt (issue #81). The
+	// deployments table still holds only confirmed history — a failure never
+	// appears there — but it now leaves a trace in deployment_attempts instead
+	// of only a log line: an included-then-failed transaction, a rejected
+	// submission, a pre-flight that stopped the run. Dry runs submit nothing,
+	// so their failures record nothing.
+	defer func() {
+		if err != nil && !req.DryRun {
+			s.recordFailure(ctx, r, store.ActionDeploy, err)
+		}
+	}()
+
 	signer, err := s.requireSigner()
 	if err != nil {
 		return nil, err

@@ -183,6 +183,16 @@ docker compose up -d
 make migrate-up
 ```
 
+Or bring up the database, the migrations, and the API in one command with the
+Compose "app" profile. Pass secrets through the environment (`.env`): the API
+refuses to start without `SOROFORGE_API_TOKEN`, and the server stays bound to
+loopback on the host. Plain `docker compose up -d` remains Postgres-only, as
+above.
+
+```bash
+docker compose --profile app up -d
+```
+
 With SQLite — no server, no Docker:
 
 ```bash
@@ -261,6 +271,10 @@ networks:
     passphrase: "Test SDF Network ; September 2015"
     sorovault_url: http://localhost:8080   # optional
     explorer_url: https://stellar.expert/explorer/testnet  # optional
+  mainnet:
+    rpc_url: https://mainnet.sorobanrpc.com
+    passphrase: "Public Global Stellar Network ; September 2015"
+    protected: true         # optional; requires a typed confirmation before deploy/upgrade
 
 contracts:
   counter:
@@ -287,6 +301,18 @@ contract WASM paths resolved to absolute paths, and reports secrets only as
 
 There is **no public SDF-hosted mainnet RPC**. Point `mainnet` at a provider you
 trust or at your own node.
+
+**`protected: true`** marks a network where deploying or upgrading spends real
+XLM and changes a live contract. `deploy` and `upgrade` there print what will
+happen (action, alias, network, passphrase) and require you to type the network
+name exactly before anything is submitted; anything else aborts with nothing
+sent. `--yes` skips the prompt for CI, and without a terminal on stdin —
+piped input, a cron job — the command *refuses* rather than hanging on a
+question no one can answer. `--dry-run` never prompts, and unprotected
+networks behave as before. The HTTP API has no prompt to offer: `/v1/deploy`
+and `/v1/upgrade` proceed on a write-scoped token alone, so protect that
+token (and gate mainnet submissions through CI review) as you would the
+prompt at a terminal.
 
 **`explorer_url`** is an optional block-explorer base URL. SoroForge appends
 `/contract/{contract_id}` and `/tx/{transaction_hash}` for deploy, upgrade, and
@@ -511,7 +537,7 @@ of an error printed mid-prompt.
 | `upgrade <alias>` | Upload new WASM and invoke the contract's upgrade entrypoint. |
 | `upload <alias>` | Install WASM on-chain without deploying or upgrading; prints the hash for a governance proposal. |
 | `list` | List tracked contracts; `--network` filters. |
-| `history <alias>` | Show a contract's full deploy/upgrade timeline, newest first. |
+| `history <alias>` | Show a contract's full deploy/upgrade timeline, newest first; `--failures` shows failed attempts instead. |
 | `history export` | Write every tracked contract and deployment as versioned JSON (`--out FILE`, else stdout). |
 | `history import <file>` | Load an export into an empty database; `--merge` imports into a populated one. |
 | `status <alias>` | Compare the on-chain WASM hash against the recorded one. |
@@ -521,8 +547,10 @@ of an error printed mid-prompt.
 | `migrate up\|down\|version` | Manage the schema. |
 | `version` | Print the SoroForge version. |
 
-`deploy`, `upgrade`, and `upload` accept `--dry-run` and `--notes`. Deploy and
-upgrade also accept `--progress`, `--require-spec`, and `--git-commit`, which
+`deploy`, `upgrade`, and `upload` accept `--dry-run` and `--notes`. `deploy`
+and `upgrade` also accept `--yes`, which skips the typed confirmation required
+on networks marked `protected: true`. They also accept `--progress`,
+`--require-spec`, and `--git-commit`, which
 records a source revision supplied by CI instead of detecting the current
 checkout. History displays confirmed transaction fees in stroops and XLM, plus
 the short source commit (`*` marks a dirty working tree).
@@ -593,6 +621,21 @@ verdict (`match`, `MISMATCH`, or `not verified`). The RPC URL is printed with
 any userinfo and query-string credentials removed — provider keys commonly live
 in the URL — so the output, including `--json`, is safe to paste into a ticket
 or CI log.
+
+**`history <alias> --failures`** shows a contract's failed deploy and upgrade
+attempts instead of its confirmed timeline: transactions that were included and
+then failed, submissions the network rejected, and runs a pre-flight check
+stopped. Failures live in their own `deployment_attempts` table and never
+appear in `history`, `status`, or drift detection — the deployments table keeps
+holding only confirmed, on-chain changes. Each row names the stage that failed
+(`simulate`, `submit`, `confirm`) and keeps the transaction hash when one was
+sent. Stored error text may quote RPC responses but is redacted of any
+secret-seed-shaped material before it is written, so `--failures` output —
+including `--json` — is safe to paste into a ticket.
+
+```bash
+soroforge history counter --failures
+```
 
 **`history export` / `history import`** move the entire recorded history
 between databases as a versioned JSON document (`version: 1`; the format is

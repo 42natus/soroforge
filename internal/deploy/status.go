@@ -246,6 +246,19 @@ func (s *Service) GetDeployment(ctx context.Context, id int64) (store.Deployment
 	return s.store.GetDeployment(ctx, id)
 }
 
+// Failures returns a contract's failed deploy and upgrade attempts, newest
+// first. They live in their own table and never mix with History: confirmed
+// changes and failed attempts answer different questions, and `status` and
+// drift logic must keep reading a deployments table that has never seen a
+// failure. Backs `soroforge history --failures`.
+func (s *Service) Failures(ctx context.Context, network, alias string) ([]store.Attempt, error) {
+	name, _, err := s.cfg.Network(network)
+	if err != nil {
+		return nil, err
+	}
+	return s.store.Attempts(ctx, name, alias)
+}
+
 // HistoryPage returns one newest-first page of a contract's deployment log.
 func (s *Service) HistoryPage(ctx context.Context, network, alias string, limit, offset int) ([]store.Deployment, error) {
 	name, _, err := s.cfg.Network(network)

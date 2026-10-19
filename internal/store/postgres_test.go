@@ -62,7 +62,7 @@ func truncate(t *testing.T, url string) {
 	require.NoError(t, err)
 	defer pool.Close()
 
-	_, err = pool.Exec(ctx, "TRUNCATE contracts, deployments RESTART IDENTITY")
+	_, err = pool.Exec(ctx, "TRUNCATE contracts, deployments, deployment_attempts RESTART IDENTITY")
 	require.NoError(t, err)
 }
 
@@ -92,7 +92,7 @@ func TestPostgresMigrationsAreReversible(t *testing.T) {
 	require.False(t, dirty, "migrations must not leave the database dirty")
 	// Bump this alongside every new migration: it is what catches a migration
 	// file that is present but never applied.
-	require.Equal(t, uint(5), version)
+	require.Equal(t, uint(6), version)
 
 	// The suite that runs first leaves rows behind, and reverting 000002
 	// narrows the action constraint — with an 'upload' row present the ADD

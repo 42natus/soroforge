@@ -362,6 +362,59 @@ func (s *SQLite) ListAllDeployments(ctx context.Context) ([]Deployment, error) {
 	return deployments, nil
 }
 
+const sqliteRecordAttempt = `
+INSERT INTO deployment_attempts (alias, network, action, stage, error, tx_hash, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+RETURNING id, alias, network, action, stage, error, tx_hash, created_at`
+
+// RecordAttempt implements Store. As in the Postgres store, the error text is
+// redacted of secret-shaped material before the row is written.
+func (s *SQLite) RecordAttempt(ctx context.Context, a Attempt) (Attempt, error) {
+	if err := a.Validate(); err != nil {
+		return Attempt{}, err
+	}
+	a.Error = SanitizeKeyMaterial(a.Error)
+
+	row := s.db.QueryRowContext(ctx, sqliteRecordAttempt,
+		a.Alias, a.Network, string(a.Action), string(a.Stage), a.Error,
+		nullableString(a.TxHash), formatSQLiteTime(time.Now().UTC()))
+
+	out, err := scanSQLiteAttempt(row)
+	if err != nil {
+		return Attempt{}, fmt.Errorf("record attempt for %s/%s: %w", a.Network, a.Alias, err)
+	}
+	return out, nil
+}
+
+const sqliteAttempts = `
+SELECT id, alias, network, action, stage, error, tx_hash, created_at
+FROM deployment_attempts
+WHERE network = ? AND alias = ?
+ORDER BY created_at DESC, id DESC`
+
+// Attempts implements Store. Newest first, the same ordering guarantee
+// History gives.
+func (s *SQLite) Attempts(ctx context.Context, network, alias string) ([]Attempt, error) {
+	rows, err := s.db.QueryContext(ctx, sqliteAttempts, network, alias)
+	if err != nil {
+		return nil, fmt.Errorf("attempts for %s/%s: %w", network, alias, err)
+	}
+	defer rows.Close()
+
+	out := []Attempt{}
+	for rows.Next() {
+		a, err := scanSQLiteAttempt(rows)
+		if err != nil {
+			return nil, fmt.Errorf("attempts for %s/%s: %w", network, alias, err)
+		}
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("attempts for %s/%s: %w", network, alias, err)
+	}
+	return out, nil
+}
+
 // scanSQLite* mirror their pgx counterparts but read timestamps as text,
 // which is how SQLite stores them.
 
@@ -432,6 +485,29 @@ func scanSQLiteDeployment(s rowScanner) (Deployment, error) {
 		return Deployment{}, err
 	}
 	return d, nil
+}
+
+func scanSQLiteAttempt(s rowScanner) (Attempt, error) {
+	var (
+		a         Attempt
+		action    string
+		stage     string
+		createdAt string
+		txHash    sql.NullString
+	)
+	if err := s.Scan(&a.ID, &a.Alias, &a.Network, &action, &stage, &a.Error, &txHash, &createdAt); err != nil {
+		return Attempt{}, err
+	}
+	a.Action = Action(action)
+	a.Stage = AttemptStage(stage)
+	if txHash.Valid {
+		a.TxHash = txHash.String
+	}
+	var err error
+	if a.CreatedAt, err = parseSQLiteTime(createdAt); err != nil {
+		return Attempt{}, err
+	}
+	return a, nil
 }
 
 func nullableString(v string) any {

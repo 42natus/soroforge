@@ -532,6 +532,38 @@ func printHistory(alias, network string, deployments []store.Deployment) error {
 	return tw.Flush()
 }
 
+// printFailures renders one contract's failed deploy and upgrade attempts —
+// the rows behind `soroforge history --failures`. Error text arrives already
+// redacted of key material by the store (see store.SanitizeKeyMaterial), so
+// printing it is safe.
+func printFailures(alias, network string, attempts []store.Attempt) error {
+	if flags.jsonOutput {
+		return printJSON(map[string]any{
+			"alias":    alias,
+			"network":  network,
+			"failures": attempts,
+		})
+	}
+
+	if len(attempts) == 0 {
+		fmt.Fprintf(out(), "No failed attempts for %s on %s.\n", alias, network)
+		return nil
+	}
+
+	fmt.Fprintf(out(), "Failed attempts for %s on %s (newest first):\n\n", alias, network)
+	tw := tabwriter.NewWriter(out(), 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "WHEN\tACTION\tSTAGE\tTX\tERROR")
+	for _, a := range attempts {
+		tx := "-"
+		if a.TxHash != "" {
+			tx = shortHash(a.TxHash)
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+			formatTime(a.CreatedAt), string(a.Action), string(a.Stage), tx, truncate(a.Error, 80))
+	}
+	return tw.Flush()
+}
+
 func printStatus(r *deploy.StatusResult) error {
 	if flags.jsonOutput {
 		return printJSON(r)

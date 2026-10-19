@@ -32,6 +32,11 @@ networks:
   mainnet:
     rpc_url: https://mainnet.sorobanrpc.com
     passphrase: "Public Global Stellar Network ; September 2015"
+    # A deploy or upgrade here spends real XLM and changes a live contract.
+    # protected makes the CLI print what will happen and require you to type
+    # the network name before submitting; --yes skips the prompt for CI, and
+    # without a terminal on stdin the command refuses rather than hanging.
+    protected: true
 
   # Any number of extra networks work the same way — a local quickstart node,
   # a staging chain, or a futurenet endpoint.

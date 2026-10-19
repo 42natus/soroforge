@@ -56,6 +56,29 @@ func TestLoadValidConfig(t *testing.T) {
 		cfg.Networks["testnet"].TransactionExplorerURL("ABC"))
 	assert.Empty(t, cfg.Networks["mainnet"].SoroVaultURL, "the registry is optional per network")
 	assert.Empty(t, cfg.Networks["mainnet"].ContractExplorerURL("C123"))
+	assert.False(t, cfg.Networks["mainnet"].Protected,
+		"networks are unprotected unless marked; testnet flows stay prompt-free")
+}
+
+func TestProtectedNetworksParse(t *testing.T) {
+	cfg, err := parse([]byte(`
+version: 1
+default_network: testnet
+networks:
+  testnet:
+    rpc_url: https://soroban-testnet.stellar.org
+    passphrase: "Test SDF Network ; September 2015"
+  mainnet:
+    rpc_url: https://mainnet.example.org
+    passphrase: "Public Global Stellar Network ; September 2015"
+    protected: true
+contracts:
+  counter:
+    wasm: ./out/counter.wasm
+`))
+	require.NoError(t, err, "protected is a recognized network key")
+	assert.True(t, cfg.Networks["mainnet"].Protected)
+	assert.False(t, cfg.Networks["testnet"].Protected)
 }
 
 func TestNetworkLookupFallsBackToDefault(t *testing.T) {

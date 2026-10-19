@@ -132,11 +132,21 @@ func (s *Service) resolveUpgradeHash(ctx context.Context, r resolved, input stri
 //
 // The entrypoint name defaults to "upgrade" and is configurable per contract
 // via `upgrade_fn`.
-func (s *Service) Upgrade(ctx context.Context, req UpgradeRequest) (*UpgradeResult, error) {
+func (s *Service) Upgrade(ctx context.Context, req UpgradeRequest) (_ *UpgradeResult, err error) {
 	r, err := s.resolve(req.Network, req.Alias)
 	if err != nil {
 		return nil, err
 	}
+
+	// Same guarantee as Deploy: a failed upgrade — an invocation the contract
+	// rejected, a submission that never landed — is recorded as an attempt and
+	// never as a deployment. Dry runs record nothing.
+	defer func() {
+		if err != nil && !req.DryRun {
+			s.recordFailure(ctx, r, store.ActionUpgrade, err)
+		}
+	}()
+
 	signer, err := s.requireSigner()
 	if err != nil {
 		return nil, err
@@ -303,8 +313,9 @@ func (s *Service) Upgrade(ctx context.Context, req UpgradeRequest) (*UpgradeResu
 	// the authority on whether the code actually changed.
 	liveAfter, err := s.awaitWasmHash(ctx, r.Client, tracked.ContractID, wasmHash)
 	if err != nil {
-		return nil, fmt.Errorf("verify upgrade of %s on %s: %w",
-			r.Alias, r.NetworkName, err)
+		return nil, staged(store.AttemptConfirm, upgrade.Hash,
+			fmt.Errorf("verify upgrade of %s on %s: %w",
+				r.Alias, r.NetworkName, err))
 	}
 	if liveAfter != wasmHash {
 		// Nothing is recorded: the provenance rule for this project is that a
@@ -312,12 +323,12 @@ func (s *Service) Upgrade(ctx context.Context, req UpgradeRequest) (*UpgradeResu
 		// This transaction confirmed but changed nothing, so there is no
 		// deployment to record. The error identifies the transaction so the
 		// failure is still auditable.
-		return nil, fmt.Errorf(
+		return nil, staged(store.AttemptConfirm, upgrade.Hash, fmt.Errorf(
 			"upgrade of %s on %s: transaction %s confirmed in ledger %d, but the contract is "+
 				"still running wasm %s, not %s; the %q entrypoint returned success without "+
 				"updating the contract's code, so nothing was recorded",
 			r.Alias, r.NetworkName, upgrade.Hash, upgrade.Ledger,
-			stellar.HashHex(liveAfter), wasmHashHex, upgradeFunc)
+			stellar.HashHex(liveAfter), wasmHashHex, upgradeFunc))
 	}
 
 	log.Info("contract upgraded",

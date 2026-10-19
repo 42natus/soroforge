@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -426,6 +427,113 @@ func runStoreSuite(t *testing.T, newStore func(t *testing.T) store.Store) {
 		_, err = s.UpsertContract(ctx, store.Contract{Alias: "counter"})
 		assert.ErrorContains(t, err, "network")
 	})
+
+	t.Run("failed attempts are recorded apart from deployments", func(t *testing.T) {
+		// The core guarantee of deployment_attempts: failures leave a trace,
+		// and they never mix with confirmed history — `status` and drift logic
+		// read a deployments table that has only ever held confirmed changes.
+		s := newStore(t)
+
+		failed, err := s.RecordAttempt(ctx, store.Attempt{
+			Alias: "flaky", Network: "testnet",
+			Action: store.ActionDeploy, Stage: store.AttemptConfirm,
+			Error:  "transaction was included in ledger 42 but failed (status FAILED)",
+			TxHash: "deadbeef",
+		})
+		require.NoError(t, err)
+		assert.NotZero(t, failed.ID)
+		assert.NotZero(t, failed.CreatedAt)
+		assert.Equal(t, store.AttemptConfirm, failed.Stage)
+		assert.Equal(t, "deadbeef", failed.TxHash)
+
+		_, err = s.RecordAttempt(ctx, store.Attempt{
+			Alias: "flaky", Network: "testnet",
+			Action: store.ActionUpgrade, Stage: store.AttemptSubmit,
+			Error: "transaction rejected by the network",
+		})
+		require.NoError(t, err)
+
+		// A deployment of the same contract must not mix with the failures.
+		_, err = s.RecordDeployment(ctx, store.Deployment{
+			Alias: "flaky", Network: "testnet", ContractID: "CFLAKY", WasmHash: "a",
+			Action: store.ActionDeploy, DeployerPubkey: "GABC",
+		})
+		require.NoError(t, err)
+
+		history, err := s.History(ctx, "testnet", "flaky")
+		require.NoError(t, err)
+		require.Len(t, history, 1, "failures must never surface as deployments")
+		assert.Equal(t, "CFLAKY", history[0].ContractID)
+
+		attempts, err := s.Attempts(ctx, "testnet", "flaky")
+		require.NoError(t, err)
+		require.Len(t, attempts, 2)
+		assert.Equal(t, store.ActionUpgrade, attempts[0].Action, "newest first")
+		assert.Equal(t, store.ActionDeploy, attempts[1].Action)
+		assert.Empty(t, attempts[0].TxHash, "a rejected submission got no hash")
+		assert.Equal(t, "deadbeef", attempts[1].TxHash)
+
+		// Unknown contracts and networks are simply empty, not errors.
+		none, err := s.Attempts(ctx, "testnet", "never-attempted")
+		require.NoError(t, err)
+		assert.Empty(t, none)
+
+		otherNet, err := s.Attempts(ctx, "futurenet", "flaky")
+		require.NoError(t, err)
+		assert.Empty(t, otherNet, "attempts are scoped per network like everything else")
+	})
+
+	t.Run("attempt error text never keeps key material", func(t *testing.T) {
+		// Error text may quote RPC responses — but a secret seed that reaches
+		// it must be redacted before the row is written, and again on read the
+		// seed must be gone. This is the issue's stated assertion.
+		s := newStore(t)
+
+		seed := "S" + strings.Repeat("A", 55) // well-formed secret seed shape
+		_, err := s.RecordAttempt(ctx, store.Attempt{
+			Alias: "flaky", Network: "testnet",
+			Action: store.ActionDeploy, Stage: store.AttemptSimulate,
+			Error: "signing failed: rpc echoed " + seed + " back",
+		})
+		require.NoError(t, err)
+
+		attempts, err := s.Attempts(ctx, "testnet", "flaky")
+		require.NoError(t, err)
+		require.Len(t, attempts, 1)
+		assert.NotContains(t, attempts[0].Error, seed)
+		assert.Contains(t, attempts[0].Error, "[REDACTED-SECRET-KEY]")
+	})
+
+	t.Run("invalid attempts are rejected", func(t *testing.T) {
+		s := newStore(t)
+
+		_, err := s.RecordAttempt(ctx, store.Attempt{
+			Alias: "flaky", Network: "testnet",
+			Action: store.ActionDeploy, Stage: "rollback", Error: "boom",
+		})
+		assert.ErrorContains(t, err, "stage")
+
+		_, err = s.RecordAttempt(ctx, store.Attempt{
+			Alias: "flaky", Network: "testnet",
+			Action: "sideways", Stage: store.AttemptSubmit, Error: "boom",
+		})
+		assert.ErrorContains(t, err, "action")
+
+		_, err = s.RecordAttempt(ctx, store.Attempt{
+			Network: "testnet", Action: store.ActionDeploy, Stage: store.AttemptSubmit, Error: "boom",
+		})
+		assert.ErrorContains(t, err, "alias")
+
+		_, err = s.RecordAttempt(ctx, store.Attempt{
+			Alias: "flaky", Action: store.ActionDeploy, Stage: store.AttemptSubmit, Error: "boom",
+		})
+		assert.ErrorContains(t, err, "network")
+
+		_, err = s.RecordAttempt(ctx, store.Attempt{
+			Alias: "flaky", Network: "testnet", Action: store.ActionDeploy, Stage: store.AttemptSimulate,
+		})
+		assert.ErrorContains(t, err, "error")
+	})
 }
 
 func TestMemoryStore(t *testing.T) {
@@ -499,4 +607,52 @@ func TestDeploymentValidate(t *testing.T) {
 		upload.ContractID = ""
 		assert.NoError(t, upload.Validate())
 	})
+}
+
+func TestAttemptValidate(t *testing.T) {
+	valid := store.Attempt{
+		Alias: "counter", Network: "testnet",
+		Action: store.ActionDeploy, Stage: store.AttemptSubmit,
+		Error: "boom",
+	}
+	require.NoError(t, valid.Validate())
+
+	tests := map[string]func(a *store.Attempt){
+		"alias":    func(a *store.Attempt) { a.Alias = "" },
+		"network":  func(a *store.Attempt) { a.Network = "" },
+		"error":    func(a *store.Attempt) { a.Error = "" },
+		"action":   func(a *store.Attempt) { a.Action = "sideways" },
+		"stage":    func(a *store.Attempt) { a.Stage = "rollback" },
+		"emptystg": func(a *store.Attempt) { a.Stage = "" },
+	}
+	for field, break_ := range tests {
+		t.Run("broken "+field, func(t *testing.T) {
+			a := valid
+			break_(&a)
+			assert.Error(t, a.Validate())
+		})
+	}
+
+	assert.True(t, store.AttemptSimulate.Valid())
+	assert.True(t, store.AttemptSubmit.Valid())
+	assert.True(t, store.AttemptConfirm.Valid())
+}
+
+func TestSanitizeKeyMaterial(t *testing.T) {
+	seed := "S" + strings.Repeat("A", 55)
+
+	got := store.SanitizeKeyMaterial("rpc response mentioned " + seed + " twice: " + seed)
+	assert.NotContains(t, got, seed)
+	assert.Equal(t, 2, strings.Count(got, "[REDACTED-SECRET-KEY]"))
+
+	// Text without key material survives untouched — the redaction is a
+	// filter for seeds, not a scrub of the whole message.
+	plain := "transaction 0abc failed with HostError: missing contract"
+	assert.Equal(t, plain, store.SanitizeKeyMaterial(plain))
+
+	// A G-address (public) is not key material and must survive, and a
+	// shorter or differently-shaped string is not falsely redacted.
+	pubkey := "G" + strings.Repeat("A", 55)
+	assert.Equal(t, pubkey, store.SanitizeKeyMaterial(pubkey))
+	assert.Equal(t, "SAAAA", store.SanitizeKeyMaterial("SAAAA"))
 }
