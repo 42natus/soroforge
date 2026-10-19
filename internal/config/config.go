@@ -82,6 +82,14 @@ type Network struct {
 	// contract's interface is discoverable as soon as it is live. Optional.
 	SoroVaultURL string `yaml:"sorovault_url"`
 
+	// Protected marks a network where a deploy or upgrade spends real money
+	// and changes a live contract — mainnet, or a chain holding real value.
+	// Mutating CLI commands then print what will happen and require the
+	// operator to type the network name before submitting; --yes skips the
+	// prompt for CI, and without a terminal on stdin the command refuses
+	// rather than hanging. The HTTP API does not prompt; see README.
+	Protected bool `yaml:"protected"`
+
 	// Webhooks lists endpoints notified after each confirmed deploy or upgrade.
 	// Optional.
 	Webhooks []Webhook `yaml:"webhooks"`

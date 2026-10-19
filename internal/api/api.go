@@ -95,6 +95,11 @@ type Options struct {
 	// Readiness checks dependencies for GET /ready. Required.
 	Readiness Readiness
 
+	// RateLimit bounds how often one client may call /v1. The zero value
+	// disables limiting; soroforge serve sets it from configuration, where
+	// the documented defaults live.
+	RateLimit RateLimitOptions
+
 	// CORSOrigins, when non-empty, allows exactly these browser origins to
 	// call the API cross-origin; empty (the default) sends no CORS headers at
 	// all, which is the behaviour every non-browser client has always seen.

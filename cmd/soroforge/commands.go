@@ -23,6 +23,7 @@ var version = "dev"
 func newDeployCmd() *cobra.Command {
 	var (
 		dryRun      bool
+		yes         bool
 		notes       string
 		gitCommit   string
 		requireSpec bool
@@ -61,7 +62,12 @@ it. --dry-run works with --all.
 
 Progress is written to stderr while waiting for confirmation, and only when
 stderr is a terminal, so stdout and --json stay clean. Use --progress to force
-it on in a pipe or log.`,
+it on in a pipe or log.
+
+On a network marked protected: true in soroforge.yaml, a real deploy prints
+what will happen and requires you to type the network name. --yes skips the
+prompt for CI; without a terminal on stdin and without --yes the command
+refuses rather than hanging. --dry-run never prompts.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if all {
 				return cobra.NoArgs(cmd, args)
@@ -80,6 +86,19 @@ it on in a pipe or log.`,
 				return err
 			}
 			defer a.Close()
+
+			networkName, network, err := a.cfg.Network(flags.network)
+			if err != nil {
+				return err
+			}
+			target := "every untracked contract"
+			if !all {
+				target = args[0]
+			}
+			if err := confirmProtected(cmd.ErrOrStderr(), os.Stdin, stdinIsTerminal(),
+				networkName, network, "deploy", target, yes, dryRun); err != nil {
+				return err
+			}
 
 			if all {
 				if cmd.Flags().Changed("arg") || cmd.Flags().Changed("args-file") {
@@ -139,6 +158,8 @@ it on in a pipe or log.`,
 
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"assemble and simulate without submitting or recording anything")
+	cmd.Flags().BoolVar(&yes, "yes", false,
+		"skip the typed confirmation on protected networks (for CI)")
 	cmd.Flags().StringVar(&notes, "notes", "",
 		"free-form note recorded with this deployment (e.g. a ticket or release tag)")
 	cmd.Flags().BoolVar(&all, "all", false,
@@ -160,6 +181,7 @@ it on in a pipe or log.`,
 func newUpgradeCmd() *cobra.Command {
 	var (
 		dryRun      bool
+		yes         bool
 		notes       string
 		gitCommit   string
 		wasmHash    string
@@ -187,7 +209,12 @@ cannot catalogue the new interface and clients cannot be generated for it.
 
 Progress is written to stderr while waiting for confirmation, and only when
 stderr is a terminal, so stdout and --json stay clean. Use --progress to force
-it on in a pipe or log.`,
+it on in a pipe or log.
+
+On a network marked protected: true in soroforge.yaml, a real upgrade prints
+what will happen and requires you to type the network name. --yes skips the
+prompt for CI; without a terminal on stdin and without --yes the command
+refuses rather than hanging. --dry-run never prompts.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := newApp(cmd.Context(), appOptions{
@@ -198,6 +225,15 @@ it on in a pipe or log.`,
 				return err
 			}
 			defer a.Close()
+
+			networkName, network, err := a.cfg.Network(flags.network)
+			if err != nil {
+				return err
+			}
+			if err := confirmProtected(cmd.ErrOrStderr(), os.Stdin, stdinIsTerminal(),
+				networkName, network, "upgrade", args[0], yes, dryRun); err != nil {
+				return err
+			}
 
 			result, err := a.service.Upgrade(cmd.Context(), deploy.UpgradeRequest{
 				Alias:       args[0],
@@ -217,6 +253,8 @@ it on in a pipe or log.`,
 
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"assemble and simulate without submitting or recording anything")
+	cmd.Flags().BoolVar(&yes, "yes", false,
+		"skip the typed confirmation on protected networks (for CI)")
 	cmd.Flags().StringVar(&notes, "notes", "",
 		"free-form note recorded with this upgrade")
 	cmd.Flags().BoolVar(&progress, "progress", false,
@@ -373,6 +411,8 @@ Pass --network to restrict the list to one network.`,
 }
 
 func newHistoryCmd() *cobra.Command {
+	var failures bool
+
 	cmd := &cobra.Command{
 		Use:   "history <alias>",
 		Short: "Show, export, or import a contract's deploy and upgrade history",
@@ -380,6 +420,11 @@ func newHistoryCmd() *cobra.Command {
 
 Each entry records the WASM hash, who deployed it, the transaction, and the
 ledger it landed in.
+
+With --failures, show the contract's failed deploy and upgrade attempts
+instead — transactions that were included and then failed, submissions the
+network rejected, and pre-flight stops. Failures are recorded in their own
+table and never appear in the normal history.
 
 The subcommands move the whole history between databases:
 
@@ -399,6 +444,14 @@ The subcommands move the whole history between databases:
 				return err
 			}
 
+			if failures {
+				attempts, err := a.service.Failures(cmd.Context(), network, alias)
+				if err != nil {
+					return err
+				}
+				return printFailures(alias, network, attempts)
+			}
+
 			deployments, err := a.service.History(cmd.Context(), network, alias)
 			if err != nil {
 				return err
@@ -407,6 +460,8 @@ The subcommands move the whole history between databases:
 		},
 	}
 
+	cmd.Flags().BoolVar(&failures, "failures", false,
+		"show failed deploy and upgrade attempts instead of confirmed history")
 	attachAliasCompletion(cmd)
 	cmd.AddCommand(newHistoryExportCmd(), newHistoryImportCmd())
 	return cmd
@@ -711,9 +766,14 @@ Endpoints:
 			}
 
 			handler, err := api.NewRouter(api.Options{
-				Service:     a.service,
-				Tokens:      tokens,
-				Readiness:   readinessChecker,
+				Service:   a.service,
+				Tokens:    tokens,
+				Readiness: readinessChecker,
+				RateLimit: api.RateLimitOptions{
+					RequestsPerSecond: rateLimit.RequestsPerSecond,
+					Burst:             rateLimit.Burst,
+					TrustProxyHeaders: rateLimit.TrustProxyHeaders,
+				},
 				CORSOrigins: corsOrigins,
 				Log:         slog.Default(),
 			})

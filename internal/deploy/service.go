@@ -520,6 +520,68 @@ type txResult struct {
 	Fee FeeEstimate
 }
 
+// stagedError attaches the submission-cycle stage at which a failure happened,
+// and the transaction hash when one was sent, to an error from
+// runTransaction. Deploy and Upgrade read it with errors.As when recording a
+// failed attempt, so the stored row says where the cycle died: before
+// submission (simulate), during the send (submit), or while confirming an
+// included transaction (confirm).
+//
+// The wrapped message is unchanged — Error() returns the underlying text as
+// is — and errors.Is/errors.As pass through Unwrap, so no existing error
+// assertion sees a difference.
+type stagedError struct {
+	stage  store.AttemptStage
+	txHash string
+	err    error
+}
+
+func (e *stagedError) Error() string { return e.err.Error() }
+func (e *stagedError) Unwrap() error { return e.err }
+
+// staged wraps err with the stage it happened at. It passes nil through, so
+// it can sit on every return path of runTransaction without special cases.
+func staged(stage store.AttemptStage, txHash string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &stagedError{stage: stage, txHash: txHash, err: err}
+}
+
+// recordFailure writes one failed deploy or upgrade attempt to the store's
+// deployment_attempts table. Deploy and Upgrade call it from a deferred guard
+// whenever a real (not dry-run) run returns an error, so an included-but-failed
+// transaction or a contract-rejected upgrade leaves a trace instead of only a
+// log line — while the deployments table keeps holding only confirmed history.
+//
+// A recording failure never replaces the operator's original error: the store
+// problem is logged and dropped. The context survives cancellation, because a
+// Ctrl-C or an expired deadline is exactly the kind of failed attempt worth
+// recording.
+func (s *Service) recordFailure(ctx context.Context, r resolved, action store.Action, err error) {
+	if err == nil {
+		return
+	}
+
+	stage, txHash := store.AttemptSimulate, ""
+	var se *stagedError
+	if errors.As(err, &se) {
+		stage, txHash = se.stage, se.txHash
+	}
+
+	if _, recErr := s.store.RecordAttempt(context.WithoutCancel(ctx), store.Attempt{
+		Alias:   r.Alias,
+		Network: r.NetworkName,
+		Action:  action,
+		Stage:   stage,
+		Error:   err.Error(),
+		TxHash:  txHash,
+	}); recErr != nil {
+		s.log.Warn("could not record failed deployment attempt",
+			"alias", r.Alias, "network", r.NetworkName, "error", recErr)
+	}
+}
+
 // runTransaction executes the full Soroban submission cycle for one operation:
 // load the account, build, simulate, assemble, and — unless this is a dry run —
 // sign, submit, and wait for confirmation.
@@ -536,14 +598,20 @@ func (s *Service) runTransaction(
 	step string,
 	dryRun bool,
 ) (txResult, error) {
+	// Every failure from here on carries its submission-cycle stage so
+	// recordFailure can say where the attempt died. Pre-submission failures —
+	// account load, simulation, assembly, signing, encodes — are all the
+	// "simulate" stage: nothing ever left this machine.
+	simulate := func(err error) error { return staged(store.AttemptSimulate, "", err) }
+
 	signer, err := s.requireSigner()
 	if err != nil {
-		return txResult{}, err
+		return txResult{}, simulate(err)
 	}
 
 	source, err := r.Client.LoadAccount(ctx, signer.Address())
 	if err != nil {
-		return txResult{}, err
+		return txResult{}, simulate(err)
 	}
 
 	tx, err := stellar.Build(stellar.BuildParams{
@@ -552,36 +620,36 @@ func (s *Service) runTransaction(
 		BaseFee:   s.baseFee,
 	})
 	if err != nil {
-		return txResult{}, err
+		return txResult{}, simulate(err)
 	}
 
 	unsignedXDR, err := tx.Base64()
 	if err != nil {
-		return txResult{}, fmt.Errorf("encode transaction: %w", err)
+		return txResult{}, simulate(fmt.Errorf("encode transaction: %w", err))
 	}
 
 	s.report(r, step, ProgressSimulating, "", 0)
 
 	sim, err := r.Client.Simulate(ctx, unsignedXDR)
 	if err != nil {
-		return txResult{}, err
+		return txResult{}, simulate(err)
 	}
 
 	assembled, err := stellar.Assemble(tx, sim)
 	if err != nil {
-		return txResult{}, err
+		return txResult{}, simulate(err)
 	}
 
 	resourceFee, err := stellar.ResourceFee(sim)
 	if err != nil {
-		return txResult{}, err
+		return txResult{}, simulate(err)
 	}
 	fee := feeEstimate(assembled.MaxFee(), resourceFee)
 
 	if dryRun {
 		envelope, err := assembled.Base64()
 		if err != nil {
-			return txResult{}, fmt.Errorf("encode assembled transaction: %w", err)
+			return txResult{}, simulate(fmt.Errorf("encode assembled transaction: %w", err))
 		}
 		// Stop before signing. Nothing is sent and nothing is recorded; the
 		// envelope is returned for inspection.
@@ -590,11 +658,11 @@ func (s *Service) runTransaction(
 
 	signed, err := signer.Sign(r.Client.NetworkPassphrase(), assembled)
 	if err != nil {
-		return txResult{}, err
+		return txResult{}, simulate(err)
 	}
 	signedXDR, err := signed.Base64()
 	if err != nil {
-		return txResult{}, fmt.Errorf("encode signed transaction: %w", err)
+		return txResult{}, simulate(fmt.Errorf("encode signed transaction: %w", err))
 	}
 
 	submitCtx, cancel := context.WithTimeout(ctx, s.confirmTimeout)
@@ -605,19 +673,21 @@ func (s *Service) runTransaction(
 	for attempt := 1; attempt <= maxSubmissionAttempts; attempt++ {
 		attempts = attempt
 		if err := submitCtx.Err(); err != nil {
-			return txResult{}, fmt.Errorf("submission stopped after %d attempt(s): %w", attempt-1, err)
+			return txResult{}, staged(store.AttemptSubmit, sent.Hash,
+				fmt.Errorf("submission stopped after %d attempt(s): %w", attempt-1, err))
 		}
 		sent, err = r.Client.Send(submitCtx, signedXDR)
 		if err != nil {
-			return txResult{}, fmt.Errorf("send transaction after %d attempt(s): %w", attempt, err)
+			return txResult{}, staged(store.AttemptSubmit, sent.Hash,
+				fmt.Errorf("send transaction after %d attempt(s): %w", attempt, err))
 		}
 		if sent.Status != stellar.SendStatusTryAgainLater {
 			break
 		}
 		if attempt == maxSubmissionAttempts {
-			return txResult{}, fmt.Errorf(
+			return txResult{}, staged(store.AttemptSubmit, sent.Hash, fmt.Errorf(
 				"RPC is busy and did not queue the transaction after %d attempts (transaction %s)",
-				attempt, sent.Hash)
+				attempt, sent.Hash))
 		}
 
 		s.log.Info("RPC asked to retry transaction submission",
@@ -627,11 +697,13 @@ func (s *Service) runTransaction(
 			"tx_hash", sent.Hash,
 		)
 		if err := waitForRetry(submitCtx, submissionRetryDelay(attempt)); err != nil {
-			return txResult{}, fmt.Errorf("submission stopped after %d attempt(s): %w", attempt, err)
+			return txResult{}, staged(store.AttemptSubmit, sent.Hash,
+				fmt.Errorf("submission stopped after %d attempt(s): %w", attempt, err))
 		}
 	}
 	if err := checkSendStatus(sent); err != nil {
-		return txResult{}, fmt.Errorf("submission failed after %d attempt(s): %w", attempts, err)
+		return txResult{}, staged(store.AttemptSubmit, sent.Hash,
+			fmt.Errorf("submission failed after %d attempt(s): %w", attempts, err))
 	}
 	s.report(r, step, ProgressSubmitted, sent.Hash, 0)
 
@@ -641,7 +713,8 @@ func (s *Service) runTransaction(
 
 	confirmed, err := s.confirm(submitCtx, r.Client, sent.Hash)
 	if err != nil {
-		return txResult{}, fmt.Errorf("confirmation failed after %d submission attempt(s): %w", attempts, err)
+		return txResult{}, staged(store.AttemptConfirm, sent.Hash,
+			fmt.Errorf("confirmation failed after %d submission attempt(s): %w", attempts, err))
 	}
 	s.report(r, step, ProgressConfirmed, confirmed.Hash, confirmed.Ledger)
 

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"runtime"
@@ -66,6 +67,27 @@ const (
 	// EnvAPIAddr overrides the HTTP API listen address.
 	EnvAPIAddr = "SOROFORGE_API_ADDR"
 
+	// EnvTLSCert is the path to a PEM certificate for serving the HTTP API
+	// over TLS. It must be set together with EnvTLSKey.
+	EnvTLSCert = "SOROFORGE_TLS_CERT"
+
+	// EnvTLSKey is the path to the PEM private key matching EnvTLSCert.
+	EnvTLSKey = "SOROFORGE_TLS_KEY"
+
+	// EnvAPIRateLimit is the sustained per-client request rate for the HTTP
+	// API, in requests per second. Unset means DefaultAPIRateLimit; 0 disables
+	// limiting.
+	EnvAPIRateLimit = "SOROFORGE_API_RATE_LIMIT"
+
+	// EnvAPIRateBurst is how many requests a client may make at once before
+	// EnvAPIRateLimit applies. Unset means DefaultAPIRateBurst.
+	EnvAPIRateBurst = "SOROFORGE_API_RATE_BURST"
+
+	// EnvAPITrustProxy makes the rate limiter take the client IP from
+	// X-Forwarded-For. Enable it only when a reverse proxy you control is the
+	// sole way in.
+	EnvAPITrustProxy = "SOROFORGE_API_TRUST_PROXY"
+
 	// EnvAPICORSOrigins lists the exact browser origins allowed to call the
 	// HTTP API from another origin, as a comma-separated list such as
 	// "https://dash.example.com,https://ops.example.com". Unset (the default)
@@ -128,17 +150,23 @@ type Env struct {
 // via RequireDatabaseURL or SigningSeed.
 func LoadEnv() Env {
 	return Env{
-		DatabaseURL:     strings.TrimSpace(os.Getenv(EnvDatabaseURL)),
-		SecretKey:       strings.TrimSpace(os.Getenv(EnvSecretKey)),
-		KeystorePath:    strings.TrimSpace(os.Getenv(EnvKeystorePath)),
-		SignerCommand:   strings.TrimSpace(os.Getenv(EnvSignerCommand)),
-		SignerPublicKey: strings.TrimSpace(os.Getenv(EnvSignerPublicKey)),
-		MaxContractSize: strings.TrimSpace(os.Getenv(EnvMaxContractSize)),
-		APIToken:        os.Getenv(EnvAPIToken),
-		APITokens:       strings.TrimSpace(os.Getenv(EnvAPITokens)),
-		APIAddr:         strings.TrimSpace(os.Getenv(EnvAPIAddr)),
-		APICORSOrigins:  strings.TrimSpace(os.Getenv(EnvAPICORSOrigins)),
-		LogFormat:       strings.ToLower(strings.TrimSpace(os.Getenv(EnvLogFormat))),
+		DatabaseURL:           strings.TrimSpace(os.Getenv(EnvDatabaseURL)),
+		SecretKey:             strings.TrimSpace(os.Getenv(EnvSecretKey)),
+		KeystorePath:          strings.TrimSpace(os.Getenv(EnvKeystorePath)),
+		SignerCommand:         strings.TrimSpace(os.Getenv(EnvSignerCommand)),
+		SignerPublicKey:       strings.TrimSpace(os.Getenv(EnvSignerPublicKey)),
+		MaxContractSize:       strings.TrimSpace(os.Getenv(EnvMaxContractSize)),
+		APIToken:              os.Getenv(EnvAPIToken),
+		APITokens:             strings.TrimSpace(os.Getenv(EnvAPITokens)),
+		APIAddr:               strings.TrimSpace(os.Getenv(EnvAPIAddr)),
+		APICORSOrigins:        strings.TrimSpace(os.Getenv(EnvAPICORSOrigins)),
+		LogFormat:             strings.ToLower(strings.TrimSpace(os.Getenv(EnvLogFormat))),
+		AllowInsecureKeystore: envBool(os.Getenv(EnvAllowInsecureKeystore)),
+		APIRateLimit:          strings.TrimSpace(os.Getenv(EnvAPIRateLimit)),
+		APIRateBurst:          strings.TrimSpace(os.Getenv(EnvAPIRateBurst)),
+		APITrustProxy:         strings.TrimSpace(os.Getenv(EnvAPITrustProxy)),
+		TLSCert:               strings.TrimSpace(os.Getenv(EnvTLSCert)),
+		TLSKey:                strings.TrimSpace(os.Getenv(EnvTLSKey)),
 	}
 }
 
@@ -425,17 +453,23 @@ func (e Env) MaxContractSizeBytes(def int) (int, error) {
 // fixed placeholder, and the database URL keeps only its shape.
 func (e Env) Redacted() map[string]string {
 	return map[string]string{
-		EnvDatabaseURL:     redact(e.DatabaseURL),
-		EnvSecretKey:       redact(e.SecretKey),
-		EnvKeystorePath:    e.KeystorePath,          // a path is not itself a secret
-		EnvSignerCommand:   redact(e.SignerCommand), // arguments may embed credentials
-		EnvSignerPublicKey: e.SignerPublicKey,       // a public key is not a secret
-		EnvMaxContractSize: e.MaxContractSize,
-		EnvAPIToken:        redact(e.APIToken),
-		EnvAPITokens:       redact(e.APITokens),
-		EnvAPIAddr:         e.ListenAddr(),
-		EnvAPICORSOrigins:  e.APICORSOrigins, // origins are public, not secrets
-		EnvLogFormat:       e.LogFormat,
+		EnvDatabaseURL:           redact(e.DatabaseURL),
+		EnvSecretKey:             redact(e.SecretKey),
+		EnvKeystorePath:          e.KeystorePath,          // a path is not itself a secret
+		EnvSignerCommand:         redact(e.SignerCommand), // arguments may embed credentials
+		EnvSignerPublicKey:       e.SignerPublicKey,       // a public key is not a secret
+		EnvMaxContractSize:       e.MaxContractSize,
+		EnvAPIToken:              redact(e.APIToken),
+		EnvAPITokens:             redact(e.APITokens),
+		EnvAPIAddr:               e.ListenAddr(),
+		EnvAPICORSOrigins:        e.APICORSOrigins, // origins are public, not secrets
+		EnvLogFormat:             e.LogFormat,
+		EnvAllowInsecureKeystore: fmt.Sprintf("%t", e.AllowInsecureKeystore),
+		EnvAPIRateLimit:          orDefault(e.APIRateLimit, "(default)"),
+		EnvAPIRateBurst:          orDefault(e.APIRateBurst, "(default)"),
+		EnvAPITrustProxy:         orDefault(e.APITrustProxy, "false"),
+		EnvTLSCert:               e.TLSCert, // a path is not itself a secret
+		EnvTLSKey:                e.TLSKey,
 	}
 }
 

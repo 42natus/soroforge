@@ -72,13 +72,13 @@ func TestSQLiteMigrationsAreReversible(t *testing.T) {
 	version, dirty, err := migrator.Version()
 	require.NoError(t, err)
 	require.False(t, dirty, "migrations must not leave the database dirty")
-	require.Equal(t, uint(5), version)
+	require.Equal(t, uint(6), version)
 
 	require.NoError(t, migrator.Down())
 	version, dirty, err = migrator.Version()
 	require.NoError(t, err)
 	require.False(t, dirty)
-	require.Equal(t, uint(4), version)
+	require.Equal(t, uint(5), version)
 
 	require.NoError(t, migrator.Up())
 }
@@ -324,7 +324,7 @@ func liveSQLiteSchema(t *testing.T) map[string][]string {
 	db := raw.(*store.SQLite).DB()
 
 	out := map[string][]string{}
-	rows, err := db.QueryContext(ctx, "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('contracts','deployments') ORDER BY name")
+	rows, err := db.QueryContext(ctx, "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('contracts','deployments','deployment_attempts') ORDER BY name")
 	require.NoError(t, err)
 	var tableNames []string
 	for rows.Next() {

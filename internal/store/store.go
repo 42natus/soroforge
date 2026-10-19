@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"time"
 )
 
@@ -124,6 +125,89 @@ type Deployment struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// AttemptStage names where in the submission cycle a failed attempt died.
+type AttemptStage string
+
+const (
+	// AttemptSimulate is everything before submission: account load,
+	// simulation, assembly, signing, and pre-flight config checks.
+	AttemptSimulate AttemptStage = "simulate"
+
+	// AttemptSubmit is the send of the signed transaction.
+	AttemptSubmit AttemptStage = "submit"
+
+	// AttemptConfirm is waiting for, and reading the result of, a submitted
+	// transaction — an included-but-failed or rejected transaction lands here.
+	AttemptConfirm AttemptStage = "confirm"
+)
+
+// Valid reports whether st is a recognised stage.
+func (st AttemptStage) Valid() bool {
+	return st == AttemptSimulate || st == AttemptSubmit || st == AttemptConfirm
+}
+
+func (st AttemptStage) String() string { return string(st) }
+
+// Attempt is one failed deploy or upgrade — deliberately not a Deployment.
+//
+// Successful history stays exactly what it was: the deployments table only
+// ever holds confirmed changes, and a failure never appears there, so status
+// and drift logic keep trusting every row they read. Failures live in their
+// own table because they carry real information — an included transaction that
+// failed, an upgrade the contract rejected — that a log line loses.
+//
+// Error may contain RPC responses, and must never contain key material; every
+// write path runs it through SanitizeKeyMaterial first.
+type Attempt struct {
+	ID      int64        `json:"id"`
+	Alias   string       `json:"alias"`
+	Network string       `json:"network"`
+	Action  Action       `json:"action"`
+	Stage   AttemptStage `json:"stage"`
+
+	// Error is the failure the operator saw, redacted of any key material.
+	Error string `json:"error"`
+
+	// TxHash is the transaction the attempt sent, when it got that far. Empty
+	// for a failure at the simulate stage, where nothing was ever submitted.
+	TxHash string `json:"tx_hash,omitempty"`
+
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Validate checks an attempt before it is written.
+func (a Attempt) Validate() error {
+	switch {
+	case a.Alias == "":
+		return fmt.Errorf("attempt: alias is required")
+	case a.Network == "":
+		return fmt.Errorf("attempt: network is required")
+	case !a.Action.Valid():
+		return fmt.Errorf("attempt: action must be %q, %q, %q, or %q, got %q",
+			ActionDeploy, ActionUpgrade, ActionUpload, ActionInvoke, a.Action)
+	case !a.Stage.Valid():
+		return fmt.Errorf("attempt: stage must be %q, %q, or %q, got %q",
+			AttemptSimulate, AttemptSubmit, AttemptConfirm, a.Stage)
+	case a.Error == "":
+		return fmt.Errorf("attempt: error is required — a failure with no explanation records nothing")
+	}
+	return nil
+}
+
+// secretSeed matches a Stellar secret seed strkey: "S" plus 55 characters of
+// the base32 alphabet. Matching is case-insensitive because seeds are written
+// in both cases in the wild. Anything of this shape in error text is treated
+// as key material regardless of whether it decodes — a false redaction in a
+// failure message costs a character count; a leaked seed costs the account.
+var secretSeed = regexp.MustCompile(`(?i)\bS[A-Z2-7]{55}\b`)
+
+// SanitizeKeyMaterial redacts anything shaped like a secret seed, so error
+// text can be recorded — and later printed by `history --failures` — without
+// ever carrying a key.
+func SanitizeKeyMaterial(s string) string {
+	return secretSeed.ReplaceAllString(s, "[REDACTED-SECRET-KEY]")
+}
+
 // Store persists contracts and their deployment history.
 //
 // It is an interface so that orchestration can be tested without Postgres — see
@@ -164,6 +248,14 @@ type Store interface {
 
 	// HistoryPage returns one newest-first page of a contract's deployment log.
 	HistoryPage(ctx context.Context, network, alias string, limit, offset int) ([]Deployment, error)
+
+	// RecordAttempt appends a failed deploy/upgrade attempt. It is kept out of
+	// the deployments table on purpose: a failure must never surface as a
+	// confirmed history entry, so status and drift logic are unaffected.
+	RecordAttempt(ctx context.Context, a Attempt) (Attempt, error)
+
+	// Attempts returns a contract's failed attempts, newest first.
+	Attempts(ctx context.Context, network, alias string) ([]Attempt, error)
 
 	// Close releases resources held by the store.
 	Close() error

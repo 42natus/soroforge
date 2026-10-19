@@ -337,6 +337,58 @@ func (p *Postgres) ListAllDeployments(ctx context.Context) ([]Deployment, error)
 	return deployments, nil
 }
 
+const recordAttemptSQL = `
+INSERT INTO deployment_attempts (alias, network, action, stage, error, tx_hash)
+VALUES ($1, $2, $3, $4, $5, $6)
+RETURNING id, alias, network, action, stage, error, tx_hash, created_at`
+
+// RecordAttempt implements Store. The error text is redacted of secret-shaped
+// material before it touches the row: a failure message quoting an RPC payload
+// must never become a stored key.
+func (p *Postgres) RecordAttempt(ctx context.Context, a Attempt) (Attempt, error) {
+	if err := a.Validate(); err != nil {
+		return Attempt{}, err
+	}
+	a.Error = SanitizeKeyMaterial(a.Error)
+
+	row := p.pool.QueryRow(ctx, recordAttemptSQL,
+		a.Alias, a.Network, string(a.Action), string(a.Stage), a.Error, optionalText(a.TxHash))
+
+	out, err := scanAttempt(row)
+	if err != nil {
+		return Attempt{}, fmt.Errorf("record attempt for %s/%s: %w", a.Network, a.Alias, err)
+	}
+	return out, nil
+}
+
+const attemptsSQL = `
+SELECT id, alias, network, action, stage, error, tx_hash, created_at
+FROM deployment_attempts
+WHERE network = $1 AND alias = $2
+ORDER BY created_at DESC, id DESC`
+
+// Attempts implements Store.
+func (p *Postgres) Attempts(ctx context.Context, network, alias string) ([]Attempt, error) {
+	rows, err := p.pool.Query(ctx, attemptsSQL, network, alias)
+	if err != nil {
+		return nil, fmt.Errorf("attempts for %s/%s: %w", network, alias, err)
+	}
+	defer rows.Close()
+
+	out := []Attempt{}
+	for rows.Next() {
+		a, err := scanAttempt(rows)
+		if err != nil {
+			return nil, fmt.Errorf("attempts for %s/%s: %w", network, alias, err)
+		}
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("attempts for %s/%s: %w", network, alias, err)
+	}
+	return out, nil
+}
+
 // importSnapshot implements snapshotImporter for Postgres.
 //
 // The identity columns are GENERATED ALWAYS, so inserting recorded ids needs
@@ -481,4 +533,23 @@ func scanDeployment(s scanner) (Deployment, error) {
 		d.ConstructorArgs = *constructorArgs
 	}
 	return d, nil
+}
+
+func scanAttempt(s scanner) (Attempt, error) {
+	var (
+		a      Attempt
+		action string
+		stage  string
+		txHash *string
+	)
+	err := s.Scan(&a.ID, &a.Alias, &a.Network, &action, &stage, &a.Error, &txHash, &a.CreatedAt)
+	if err != nil {
+		return Attempt{}, err
+	}
+	a.Action = Action(action)
+	a.Stage = AttemptStage(stage)
+	if txHash != nil {
+		a.TxHash = *txHash
+	}
+	return a, nil
 }

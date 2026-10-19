@@ -25,6 +25,12 @@ type MemoryStore struct {
 	deployments []Deployment
 	nextID      int64
 
+	// Failed attempts live in their own list with their own id counter,
+	// mirroring the separate deployment_attempts table its own sequence —
+	// ids mean different things in the two tables and must not interfere.
+	attempts     []Attempt
+	attemptsNext int64
+
 	// now is overridable so tests can produce deterministic timestamps.
 	now func() time.Time
 }
@@ -34,9 +40,10 @@ var _ Store = (*MemoryStore)(nil)
 // NewMemoryStore returns an empty in-memory store.
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		contracts: make(map[string]Contract),
-		nextID:    1,
-		now:       time.Now,
+		contracts:    make(map[string]Contract),
+		nextID:       1,
+		attemptsNext: 1,
+		now:          time.Now,
 	}
 }
 
@@ -258,6 +265,52 @@ func (m *MemoryStore) HistoryPage(ctx context.Context, network, alias string, li
 		end = offset + limit
 	}
 	return history[offset:end], nil
+}
+
+// RecordAttempt implements Store. Like the SQL backends, the stored error is
+// redacted of any secret-shaped material before it is kept.
+func (m *MemoryStore) RecordAttempt(ctx context.Context, a Attempt) (Attempt, error) {
+	if err := ctx.Err(); err != nil {
+		return Attempt{}, err
+	}
+	if err := a.Validate(); err != nil {
+		return Attempt{}, err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	a.ID = m.attemptsNext
+	m.attemptsNext++
+	a.CreatedAt = m.now()
+	a.Error = SanitizeKeyMaterial(a.Error)
+
+	m.attempts = append(m.attempts, a)
+	return a, nil
+}
+
+// Attempts implements Store. Newest first, same ordering guarantee as History.
+func (m *MemoryStore) Attempts(ctx context.Context, network, alias string) ([]Attempt, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	out := []Attempt{}
+	for _, a := range m.attempts {
+		if a.Network == network && a.Alias == alias {
+			out = append(out, a)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.After(out[j].CreatedAt)
+		}
+		return out[i].ID > out[j].ID
+	})
+	return out, nil
 }
 
 // Close implements Store. There is nothing to release.
